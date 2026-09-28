@@ -101,6 +101,11 @@ May run repeatedly on overlapping ranges.  Extensions must replace only
  their own decorations in that range, and must not change buffer text.
 Neither native token faces nor base overlays belong to extensions.")
 (defvar-local djot--footnote-return nil)
+(defvar-local djot--index-tick nil)
+(defvar-local djot--references nil)
+(defvar-local djot--headings nil)
+(defvar-local djot--anchors nil)
+(defvar-local djot--multiline-references-p nil)
 
 (defun djot-node-at (&optional position type)
   "Return the smallest named Djot node at POSITION, defaulting to point.
@@ -162,10 +167,17 @@ clip decorations to BEG END.  Nodes must not be retained across edits."
         (overlay-put overlay (pop properties) (pop properties)))
       overlay)))
 
-(defun djot--clear-overlays (beg end)
-  "Delete only base-mode overlays intersecting BEG END."
+(defun djot--clear-overlays (beg end &optional preserve-outside)
+  "Delete base-mode overlays in BEG END.
+With PRESERVE-OUTSIDE, retain the portions outside that range."
   (dolist (overlay (overlays-in beg end))
-    (when (overlay-get overlay 'djot-mode) (delete-overlay overlay))))
+    (when (overlay-get overlay 'djot-mode)
+      (when preserve-outside
+        (when (< (overlay-start overlay) beg)
+          (move-overlay (copy-overlay overlay) (overlay-start overlay) beg))
+        (when (> (overlay-end overlay) end)
+          (move-overlay (copy-overlay overlay) end (overlay-end overlay))))
+      (delete-overlay overlay))))
 
 (defun djot--hide (beg end start finish)
   "Conceal BEG END, clipped to fontification range START FINISH."
@@ -240,7 +252,7 @@ LOUDLY is passed through to the Tree-sitter fontifier."
 
 (defun djot--unfontify-region (beg end)
   "Remove base fontification in BEG END, preserving foreign overlays."
-  (djot--clear-overlays beg end)
+  (djot--clear-overlays beg end t)
   (font-lock-default-unfontify-region beg end))
 
 (defun djot-refresh (&optional beg end)
@@ -335,11 +347,12 @@ configured document display.  Moving point never changes this setting."
     ;; Empty descriptions must retain an actionable visible source link.
     (when (= beg finish)
       (setq beg (treesit-node-start node) finish (treesit-node-end node)))
-    (djot--face node 'djot-link start end)
-    (djot--overlay (max beg start) (min finish end)
-                   'keymap djot-link-map 'mouse-face 'highlight 'follow-link t
-                   'help-echo (or destination "Unresolved Djot reference")
-                   'djot-link destination)
+    (djot--face node (if (equal (treesit-node-type node) "footnote_reference")
+                         'djot-footnote 'djot-link) start end)
+    (when destination
+      (djot--overlay (max beg start) (min finish end)
+                     'keymap djot-link-map 'mouse-face 'highlight 'follow-link t
+                     'help-echo destination 'djot-link destination))
     (when (and djot-descriptive-links destination
                (not (equal (treesit-node-type node) "footnote_reference")))
       (djot--hide (treesit-node-start node) beg start end)
@@ -361,8 +374,10 @@ scheme.  Resolution is case-sensitive and never retrieves resources."
     (cond
      ((equal type "autolink")
       (let ((text (substring (djot--text node) 1 -1)))
-        (if (and (string-match-p "@" text) (not (string-match-p ":" text)))
-            (concat "mailto:" text) text)))
+        (cond
+         ((string-match-p "\\`[[:alpha:]][[:alnum:]+.-]*:" text) text)
+         ((string-match-p "\\`[^@ <>]+@[^@ <>]+\\'" text) (concat "mailto:" text))
+         (t nil))))
      ((equal type "footnote_reference")
       (concat "footnote:" (djot--text (car (cl-remove-if-not
                                           (lambda (n) (equal (treesit-node-type n) "reference_label"))
@@ -377,19 +392,15 @@ scheme.  Resolution is case-sensitive and never retrieves resources."
              (label (djot--normalize-label
                      (if label-node (djot--text label-node)
                        (buffer-substring-no-properties (car bounds) (cdr bounds))))))
-        (or (djot--reference-destination label)
-            (cdr (assoc label (djot--heading-references)))))))))
+        (djot--ensure-index)
+        (if-let* ((reference (assoc label djot--references)))
+            (cdr reference)
+          (cdr (assoc label (djot--heading-references)))))))))
 
 (defun djot--reference-destination (label)
   "Find the explicit reference destination for normalized LABEL."
-  (let (destination)
-    (djot-map-nodes
-     (lambda (node)
-       (when (and (not destination) (djot-node-valid-p node)
-                  (equal label (djot--normalize-label (djot--text (djot--field node "label")))))
-         (setq destination (djot--unescape (djot--text (djot--field node "destination"))))))
-     nil nil '("link_reference_definition"))
-    destination))
+  (djot--ensure-index)
+  (cdr (assoc label djot--references)))
 
 (defun djot--plain-text (node)
   "Return NODE's plain inline text for implicit heading targets."
@@ -397,11 +408,17 @@ scheme.  Resolution is case-sensitive and never retrieves resources."
     (cond
      ((member type '("footnote_reference" "symbol" "inline_attribute" "marker")) "")
      ((equal type "backslash_escape") (substring (djot--text node) 1))
+     ((equal type "em_dash") "—")
+     ((equal type "en_dash") "–")
+     ((equal type "ellipsis") "…")
      ((member type '("verbatim" "math" "raw_inline")) (djot--text (djot--field node "content")))
      ((djot--field node "content") (djot--plain-text (djot--field node "content")))
      ((member type djot--link-types)
-      (pcase-let ((`(,beg . ,end) (djot--link-text-bounds node)))
-        (buffer-substring-no-properties beg end)))
+      (if-let* ((text (or (djot--field node "text") (djot--field node "description"))))
+          (substring (djot--plain-text text)
+                     (if (equal (treesit-node-type text) "image_description") 2 1) -1)
+        (pcase-let ((`(,beg . ,end) (djot--link-text-bounds node)))
+          (buffer-substring-no-properties beg end))))
      (t
       (dolist (child (djot-node-children node))
         (push (buffer-substring-no-properties position (treesit-node-start child)) parts)
@@ -410,22 +427,100 @@ scheme.  Resolution is case-sensitive and never retrieves resources."
       (push (buffer-substring-no-properties position (treesit-node-end node)) parts)
       (apply #'concat (nreverse parts))))))
 
+(defun djot--reference-supported-p (node)
+  "Return non-nil if NODE has a complete reference destination.
+Older grammars omit continuation chunks.  Reject a potentially continued
+definition rather than opening a silently truncated URL."
+  (or djot--multiline-references-p
+      (and (djot--field node "destination")
+           (save-excursion
+             (goto-char (treesit-node-end node))
+             (not (looking-at-p "[ \t]+[^ \t\n]"))))))
+
+(defun djot--reference-url (node)
+  "Return the complete URL from validated reference definition NODE."
+  (let ((destination (djot--field node "destination")))
+    (djot--unescape
+     (if djot--multiline-references-p
+         (mapconcat #'djot--text
+                    (cl-remove-if-not
+                     (lambda (child) (equal (treesit-node-type child) "link_destination_chunk"))
+                     (and destination (djot-node-children destination))) "")
+       (djot--text destination)))))
+
+(defun djot--attribute-id (node)
+  "Return the first identifier within attribute NODE, if any."
+  (when-let* ((identifier (car (treesit-query-capture node '((identifier) @id)))))
+    (substring (djot--text (cdr identifier)) 1)))
+
+(defun djot--ensure-index ()
+  "Rebuild reference and heading indexes once per source modification.
+Only plain strings and positions survive the query; no nodes are cached."
+  (unless (eq djot--index-tick (buffer-chars-modified-tick))
+    (let ((old-signature (list djot--references (mapcar #'butlast djot--headings)))
+          (used (make-hash-table :test #'equal))
+          (empty-id 0) attributes headings)
+      (setq djot--references nil djot--headings nil djot--anchors nil)
+      (save-restriction
+        (widen)
+        (djot-map-nodes
+         (lambda (node)
+           (when (djot-node-valid-p node)
+             (pcase (treesit-node-type node)
+               ("identifier"
+                (push (cons (substring (djot--text node) 1) (treesit-node-start node)) djot--anchors))
+               ("block_attribute" (push node attributes))
+               ("heading" (push node headings))
+               ("link_reference_definition"
+                (let ((label (djot--normalize-label (djot--text (djot--field node "label")))))
+                  ;; The official renderer lets the last definition win.
+                  (setf (alist-get label djot--references nil nil #'equal)
+                        (and (djot--reference-supported-p node)
+                             (djot--reference-url node))))))))
+         nil nil '("identifier" "block_attribute" "heading" "link_reference_definition"))
+        (dolist (node (nreverse headings))
+          (let* ((label (djot--normalize-label (djot--plain-text (djot--field node "content"))))
+                 (base (replace-regexp-in-string
+                        " " "-" (replace-regexp-in-string "[^[:alnum:]_ -]" "" label)))
+                 (position (treesit-node-start node))
+                 explicit)
+            ;; Block attributes attach immediately, and may be stacked.
+            (dolist (attribute attributes)
+              (when (= (treesit-node-end attribute) position)
+                (setq explicit (or explicit (djot--attribute-id attribute))
+                      position (treesit-node-start attribute))))
+            (when (string-empty-p base)
+              (setq empty-id (1+ empty-id) base (format "s-%d" empty-id)))
+            (let ((id (or explicit base)) (number 1))
+              (unless explicit
+                (while (gethash id used)
+                  (setq id (format "%s-%d" base number) number (1+ number))))
+              (puthash id t used)
+              (push (list label id (treesit-node-start node)) djot--headings))))
+        (setq djot--headings (nreverse djot--headings)
+              djot--anchors (nreverse djot--anchors)
+              djot--index-tick (buffer-chars-modified-tick))
+        ;; A definition edit can change a link well outside the edited range.
+        ;; Invalidate those links, not all document decorations.
+        (unless (equal old-signature
+                       (list djot--references (mapcar #'butlast djot--headings)))
+          (djot-map-nodes
+           (lambda (node)
+             (let ((beg (treesit-node-start node)) (end (treesit-node-end node)))
+               (djot--clear-overlays beg end t)
+               (with-silent-modifications (put-text-property beg end 'fontified nil))))
+           nil nil '("full_reference_link" "collapsed_reference_link"
+                     "full_reference_image" "collapsed_reference_image")))))))
+
+(defun djot--after-change (_beg _end _old-length)
+  "Update an already-used reference index after a source edit.
+_BEG, _END and _OLD-LENGTH are the standard change-hook arguments."
+  (when djot--index-tick (djot--ensure-index)))
+
 (defun djot--heading-targets ()
   "Return heading entries (LABEL ID POSITION), including unique IDs."
-  (let ((used (make-hash-table :test #'equal)) entries)
-    (djot-map-nodes
-     (lambda (node)
-       (when (djot-node-valid-p node)
-         (let* ((label (djot--normalize-label (djot--plain-text (djot--field node "content"))))
-                (base (replace-regexp-in-string
-                       " " "-" (replace-regexp-in-string "[^[:alnum:]_ -]" "" label)))
-                (id base) (number 1))
-           (while (gethash id used)
-             (setq id (format "%s-%d" base number) number (1+ number)))
-           (puthash id t used)
-           (push (list label id (treesit-node-start node)) entries))))
-     nil nil '("heading"))
-    (nreverse entries)))
+  (djot--ensure-index)
+  djot--headings)
 
 (defun djot--heading-references ()
   "Return implicit heading reference names and destinations."
@@ -434,14 +529,9 @@ scheme.  Resolution is case-sensitive and never retrieves resources."
 
 (defun djot--goto-anchor (id)
   "Go to local anchor ID, or signal an actionable error."
-  (let (position)
-    (djot-map-nodes
-     (lambda (node)
-       (when (equal (concat "#" id) (djot--text node))
-         (setq position (treesit-node-start node))))
-     nil nil '("identifier"))
-    (unless position
-      (setq position (nth 2 (cl-find id (djot--heading-targets) :key #'cadr :test #'equal))))
+  (djot--ensure-index)
+  (let ((position (or (nth 2 (cl-find id (djot--heading-targets) :key #'cadr :test #'equal))
+                      (cdr (assoc id djot--anchors)))))
     (unless position (user-error "No Djot anchor: %s" id))
     (push-mark)
     (goto-char position)
@@ -474,9 +564,10 @@ Unsafe executable URL schemes are rejected, never evaluated."
   (interactive)
   (let* ((node (djot--link-at-point))
          (destination (and node (djot-link-destination node))))
-    (unless (and destination (not (string-empty-p destination)))
-      (user-error "No resolved Djot link at point"))
+    (unless destination
+      (user-error "Unresolved Djot link; check label and install the pinned grammar from README"))
     (cond
+     ((string-empty-p destination) (push-mark) (goto-char (point-min)))
      ((string-prefix-p "footnote:" destination)
       (djot--goto-footnote (substring destination 9)))
      ((string-prefix-p "#" destination)
@@ -539,12 +630,16 @@ Unsafe executable URL schemes are rejected, never evaluated."
 ;;;###autoload
 (define-derived-mode djot-mode text-mode "Djot"
   "Major mode for Djot using one Tree-sitter parser.
-Install the grammar from https://github.com/treeman/tree-sitter-djot
+Install the grammar from https://codeberg.org/treeman/tree-sitter-djot
 with `treesit-install-language-grammar' before activating this mode."
   (unless (treesit-ready-p 'djot t)
     (user-error "Install the Djot grammar: see djot-mode README, then M-x treesit-install-language-grammar RET djot"))
   (setq djot-parser (treesit-parser-create 'djot))
   (setq-local treesit-primary-parser djot-parser)
+  (setq djot--multiline-references-p
+        (condition-case nil
+            (progn (treesit-query-compile 'djot '((link_destination_chunk) @chunk) t) t)
+          (treesit-query-error nil)))
   (setq-local treesit-font-lock-settings
               (treesit-font-lock-rules :language 'djot :feature 'djot
                                        :override 'prepend '((_) @djot--fontify-node)))
@@ -560,6 +655,7 @@ with `treesit-install-language-grammar' before activating this mode."
   (setq-local comment-start "{% ")
   (setq-local comment-end " %}")
   (add-to-invisibility-spec 'djot-markup)
+  (add-hook 'after-change-functions #'djot--after-change nil t)
   (add-hook 'change-major-mode-hook #'djot--teardown nil t)
   (add-hook 'kill-buffer-hook #'djot--teardown nil t))
 

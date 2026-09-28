@@ -185,5 +185,108 @@
       (should calls)
       (should (cl-every (lambda (range) (and (<= 1 (car range)) (<= (cdr range) (point-max)))) calls)))))
 
+(ert-deftest djot-mode-heading-identifiers-match-official-renderer ()
+  (djot-test-with "[A][] [A B][] [same][] [!!!][]\n\n{#custom}\n{.important}\n# A\n\n# A *B*[^n]\n\n# same\n\n# same\n\n# !!!\n\n[^n]: note\n"
+    (search-forward "A]") (backward-char 1)
+    (should (equal (djot-link-destination (djot--link-at-point)) "#custom"))
+    (djot-open-at-point)
+    (should (looking-at "# A"))
+    (goto-char 1) (search-forward "A B")
+    (should (equal (djot-link-destination (djot--link-at-point)) "#A-B"))
+    (search-forward "same")
+    (should (equal (djot-link-destination (djot--link-at-point)) "#same"))
+    (search-forward "!!!")
+    (should (equal (djot-link-destination (djot--link-at-point)) "#s-1"))))
+
+(ert-deftest djot-mode-reference-last-definition-wins ()
+  (djot-test-with "[ref][]\n\n[ref]: /one\n\n[ref]: /two\n"
+    (search-forward "ref")
+    (should (equal (djot-link-destination (djot--link-at-point)) "/two"))))
+
+(ert-deftest djot-mode-multiline-references-and-old-grammar-safety ()
+  (dolist (pair '(("[ref]: https://example.org/first\n  second\n" . "https://example.org/firstsecond")
+                  ("[ref]:\n  https://example.org/\n" . "https://example.org/")))
+    (djot-test-with (concat "[ref][]\n\n" (car pair))
+      (search-forward "ref")
+      (if djot--multiline-references-p
+          (progn
+            (should (invisible-p 1))
+            (should (equal (djot-link-destination (djot--link-at-point)) (cdr pair))))
+        (should-not (invisible-p 1))
+        (should-not (get-char-property (1- (point)) 'keymap))
+        (should-error (djot-open-at-point) :type 'user-error)))))
+
+(ert-deftest djot-mode-reference-edits-update-distant-links ()
+  (djot-test-with "[ref][]\n\nSome other text.\n\n[ref]: https://example.org/\n"
+    (search-forward "ref")
+    (should (equal (get-char-property (1- (point)) 'help-echo) "https://example.org/"))
+    (goto-char (point-max))
+    (insert "  continuation\n")
+    (font-lock-ensure)
+    (goto-char 3)
+    (if djot--multiline-references-p
+        (should (equal (get-char-property (point) 'help-echo) "https://example.org/continuation"))
+      (should-not (get-char-property (point) 'keymap))
+      (should-not (invisible-p 1)))))
+
+(ert-deftest djot-mode-multiline-link-partial-refresh-preserves-ranges ()
+  (djot-test-with "[link\n  more](https://example.org) after\n"
+    (should (invisible-p 1))
+    (search-forward "https")
+    (should (invisible-p (1- (point))))
+    (let ((point-before (point)))
+      (djot-refresh (line-beginning-position) (line-end-position))
+      (should (= point-before (point)))
+      (should (invisible-p 1))
+      (should (invisible-p (1- (point)))))))
+
+(ert-deftest djot-mode-native-fontification-does-not-run-hooks-or-code ()
+  (let ((hook-ran nil) (executed nil))
+    (let ((emacs-lisp-mode-hook (list (lambda () (setq hook-ran t)))))
+      (djot-test-with (concat "```elisp\n(setq executed t)\n;; Local "
+                              "Variables:\n;; eval: (setq executed t)\n;; End:\n```\n")
+        (should-not hook-ran)
+        (should-not executed)))))
+
+(ert-deftest djot-mode-edit-source-command-reveals-destination ()
+  (djot-test-with "[link](https://example.org)\n"
+    (search-forward "link")
+    (djot-edit-at-point)
+    (should djot-source-visible)
+    (should (looking-at "https://example.org"))
+    (should-not (invisible-p 1))))
+
+(ert-deftest djot-mode-plain-angle-text-is-not-an-autolink ()
+  (djot-test-with "<not-a-url>\n"
+    (should-not (invisible-p 1))
+    (forward-char 2)
+    (should-not (get-char-property (point) 'keymap))
+    (should-error (djot-open-at-point) :type 'user-error)))
+
+(ert-deftest djot-mode-multiline-inline-destinations-with-following-prose ()
+  (dolist (source '("[link](https://example.org/\n  more) after\n"
+                    "[link](https://example.org/\nmore) after\n"
+                    "[link](https://example.org/\n  more)\n"))
+    (djot-test-with source
+      (when djot--multiline-references-p
+        (search-forward "link")
+        (should (equal (djot-link-destination (djot--link-at-point)) "https://example.org/more"))
+        (should (invisible-p 1))
+        (when (search-forward "after" nil t)
+          (should-not (invisible-p (1- (point)))))))))
+
+(ert-deftest djot-mode-official-0-3-2-trailing-reference-whitespace ()
+  (djot-test-with "[r][]\n\n[r]: /first   \n  second\n"
+    (when djot--multiline-references-p
+      (search-forward "r")
+      (should-not (djot-link-destination (djot--link-at-point)))
+      (should-not (invisible-p 1))))
+  (djot-test-with "[r][]\n\n[r]: /first\n  second  \n"
+    (when djot--multiline-references-p
+      (search-forward "r")
+      (should (equal (djot-link-destination (djot--link-at-point)) "/first"))
+      (search-forward "second")
+      (should-not (invisible-p (1- (point)))))))
+
 (provide 'djot-mode-test)
 ;;; djot-mode-test.el ends here
