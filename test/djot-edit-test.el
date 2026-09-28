@@ -233,5 +233,102 @@
       (should (looking-at "\\[\\^1\\]:"))
       (should (= 1 (length (treesit-query-capture (treesit-parser-root-node djot-parser) '((footnote) @note))))))))
 
+
+(ert-deftest djot-table-concealed-width-unicode-and-display-toggle ()
+  (djot-test-with "| [link](https://example.org/long) | 界 |\n| plain | é |\n"
+    (search-forward "link")
+    (let ((offset (- (point) (line-beginning-position))))
+      (djot-table-align)
+      (should (= offset (- (point) (line-beginning-position)))))
+    (let ((source (buffer-string)))
+      (dotimes (_ 3) (djot-table-align))
+      (should (equal source (buffer-string)))
+      (should (string-match-p "| plain |" source))
+      ;; Modern/foreign display spacing must not influence alignment.
+      (let ((foreign (make-overlay (point-min) (1+ (point-min)))))
+        (overlay-put foreign 'display "                         ")
+        (djot-table-align)
+        (should (equal source (buffer-string)))
+        (delete-overlay foreign))
+      (buffer-enable-undo)
+      (setq buffer-undo-list nil)
+      (djot-show-source 1)
+      (should (equal source (buffer-string)))
+      (should-not buffer-undo-list)
+      (djot-table-align)
+      (should (> (length (buffer-string)) (length source)))
+      (let ((visible-source (buffer-string)))
+        (dotimes (_ 3) (djot-table-align))
+        (should (equal visible-source (buffer-string))))
+      (undo-boundary)
+      (undo 1)
+      (should (equal source (buffer-string))))))
+
+(ert-deftest djot-table-empty-columns-survive-every-edit ()
+  (dolist (source '("|a||c|\n" "||b||\n" "||||\n" "| | | |\n"))
+    (djot-test-with source
+      (let ((before (nth 3 (car (djot--table-rows)))))
+        (should (= 3 (length before)))
+        (djot-table-align)
+        (should (equal before (nth 3 (car (djot--table-rows)))))
+        (djot-table-insert-column)
+        (should (= 4 (length (nth 3 (car (djot--table-rows))))))
+        (djot-table-delete-column)
+        (should (equal before (nth 3 (car (djot--table-rows)))))))))
+
+(ert-deftest djot-definition-body-ret-is-not-a-new-term ()
+  (djot-test-with ": term\n\n  definition"
+    (goto-char (point-max))
+    (djot-newline)
+    (insert "continued")
+    (should (equal (buffer-string) ": term\n\n  definition\n  continued"))
+    (should (= 1 (length (treesit-query-capture (treesit-parser-root-node djot-parser) '((list_item) @item)))))))
+
+(ert-deftest djot-edit-reference-reveals-definition-destination ()
+  (djot-test-with "[text][r]\n\n[r]: https://example.org\n"
+    (goto-char 3)
+    (djot-edit-at-point)
+    (should (looking-at "https://example.org"))
+    (should djot-source-visible)))
+
+(ert-deftest djot-folded-link-target-is-revealed-explicitly ()
+  (djot-test-with "# One\n\n## Child\n\nbody\n\n# Two\n\n[visit](#Child)\n"
+    (djot-cycle)
+    (goto-char (point-max))
+    (search-backward "visit")
+    (djot-open-at-point)
+    (should (looking-at "## Child"))
+    (should-not (invisible-p (point)))))
+
+
+(ert-deftest djot-table-eof-source-preservation-and-navigation ()
+  (dolist (source '("|a||c|" "||||" "|a\\|b|`c|d`||" "|a|b|\n|---|---:|"
+                    "> |a||c|" "- table\n\n  ||b||"))
+    (djot-test-with source
+      (goto-char (point-max))
+      (let ((cells (mapcar (lambda (row) (nth 3 row)) (djot--table-rows))))
+        (djot-table-align)
+        (should-not (string-suffix-p "\n" (buffer-string)))
+        (cl-loop for before in cells for after in (djot--table-rows) do
+                 (if (nth 4 after)
+                     (should (equal (mapcar (lambda (cell) (replace-regexp-in-string "-+" "-" cell)) before)
+                                    (mapcar (lambda (cell) (replace-regexp-in-string "-+" "-" cell)) (nth 3 after))))
+                   (should (equal before (nth 3 after)))))
+        (djot-table-next-cell)
+        (should (= (1+ (length cells)) (length (djot--table-rows))))))))
+
+(ert-deftest djot-table-quoted-caption-edit-preserves-caption ()
+  (djot-test-with "> |a||c|\n>\n> ^ caption\n"
+    (search-forward "a")
+    (djot-table-align)
+    (djot-table-insert-column)
+    (should (string-suffix-p ">\n> ^ caption\n" (buffer-string)))
+    (should (= 1 (length (treesit-query-capture (treesit-parser-root-node djot-parser) '((table_caption) @caption)))))))
+
+(ert-deftest djot-heading-fold-keeps-eof-title-visible ()
+  (djot-test-with "# Title"
+    (djot-cycle)
+    (should-not (invisible-p (1- (point-max))))))
+
 (provide 'djot-edit-test)
 ;;; djot-edit-test.el ends here

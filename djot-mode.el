@@ -285,7 +285,15 @@ configured document display.  Moving point never changes this setting."
   (let* ((node (djot--link-at-point))
          (destination (and node (djot--field node "destination"))))
     (djot-show-source 1)
-    (when destination (goto-char (1+ (treesit-node-start destination))))))
+    (cond
+     (destination (goto-char (1+ (treesit-node-start destination))))
+     ((and node (string-match-p "reference_\\(?:link\\|image\\)" (treesit-node-type node)))
+      (djot-goto-reference)
+      (when-let* ((definition (djot-node-at (point) "link_reference_definition"))
+                  (target (djot--field definition "destination")))
+        (goto-char (treesit-node-start target))))
+     ((and node (equal (treesit-node-type node) "autolink"))
+      (goto-char (1+ (treesit-node-start node)))))))
 
 (defun djot--fontify-code (node start end)
   "Natively fontify NODE's code, clipping copied faces to START END."
@@ -617,6 +625,11 @@ Unsafe executable URL schemes are rejected, never evaluated."
      nil nil '("heading"))
     (nreverse entries)))
 
+(defun djot--heading-body-start (entry)
+  "Return the beginning of the foldable body after heading ENTRY."
+  (let ((end (nth 1 entry)))
+    (if (eq (char-before end) ?\n) (1- end) end)))
+
 (defun djot--current-heading ()
   "Return the heading entry enclosing point, or signal a user error."
   (or (car (last (cl-remove-if-not
@@ -658,21 +671,24 @@ Unsafe executable URL schemes are rejected, never evaluated."
   "Cycle this heading through folded, children and fully open states."
   (interactive)
   (pcase-let* ((`(,beg ,head-end ,level ,end) (djot--current-heading))
-               (body (max beg (1- head-end)))
+               (body (djot--heading-body-start (list beg head-end)))
                (folds (djot--folds body end))
                (closed (cl-find-if (lambda (ov) (and (= (overlay-start ov) body)
                                                      (= (overlay-end ov) end))) folds)))
     (cond
      (closed
       (mapc #'delete-overlay folds)
-      (let ((children (cl-remove-if-not
-                       (lambda (entry) (and (> (car entry) beg) (< (car entry) end)
-                                            (= (nth 2 entry) (1+ level))))
-                       (djot--heading-entries))))
+      (let ((children nil) (child-end body))
+        (dolist (entry (djot--heading-entries))
+          (when (and (> (car entry) beg) (< (car entry) end)
+                     (> (nth 2 entry) level) (>= (car entry) child-end))
+            (push entry children)
+            (setq child-end (nth 3 entry))))
+        (setq children (nreverse children))
         (when children
           (djot--fold body (caar children))
           (dolist (entry children)
-            (djot--fold (1- (nth 1 entry)) (nth 3 entry))))))
+            (djot--fold (djot--heading-body-start entry) (nth 3 entry))))))
      (folds (mapc #'delete-overlay folds))
      (t (djot--fold body end)))))
 
@@ -680,11 +696,11 @@ Unsafe executable URL schemes are rejected, never evaluated."
   "Toggle between a heading overview and the fully visible document."
   (interactive)
   (if (djot--folds (point-min) (point-max)) (djot-show-all)
-    (dolist (entry (djot--heading-entries))
-      (djot--fold (1- (nth 1 entry))
-                  (or (car (cl-find-if (lambda (next) (> (car next) (car entry)))
-                                       (djot--heading-entries)))
-                      (point-max))))))
+    (let ((entries (djot--heading-entries)))
+      (while entries
+        (djot--fold (djot--heading-body-start (car entries))
+                    (or (caadr entries) (point-max)))
+        (setq entries (cdr entries))))))
 
 (defun djot-next-heading (&optional backward)
   "Move to the next parsed heading; with BACKWARD, move to the previous."
@@ -832,7 +848,8 @@ nested block, insert after the whole item.  On an empty item, end the list."
         (delete-region start marker-end)
         (goto-char start))
        ((or definition (< (point) marker-end)
-            (djot-node-at (point) "code_block") (djot-node-at (point) "table"))
+            (djot-node-at (point) "code_block") (djot-node-at (point) "raw_block")
+            (djot-node-at (point) "table"))
         (goto-char end)
         (unless (bolp) (insert "\n"))
         (when definition (insert prefix "\n"))
@@ -866,6 +883,8 @@ An empty list item ends the list.  In a definition term, start its body."
       (let ((prefix (djot--item-prefix item)))
         (end-of-line)
         (insert "\n" prefix "\n" prefix "  ")))
+     ((and item (djot--field item "term"))
+      (insert "\n" (djot--item-prefix item) "  "))
      ((and item (not (or (djot-node-at (point) "code_block")
                          (djot-node-at (point) "raw_block"))))
       (djot-insert-item))
@@ -879,7 +898,8 @@ With prefix REMOVE, remove the checkbox while preserving the bullet."
          (marker (djot--field item "marker"))
          (type (treesit-node-type marker))
          (start (treesit-node-start marker))
-         (check (djot--field marker "checkmark")))
+         (check (djot--field marker "checkmark"))
+         (checked (and check (equal (treesit-node-type check) "checked"))))
     (unless (member type '("list_marker_task" "list_marker_dash" "list_marker_plus" "list_marker_star"))
       (user-error "Djot checkboxes require a bullet list"))
     (atomic-change-group
@@ -890,7 +910,7 @@ With prefix REMOVE, remove the checkbox while preserving the bullet."
          (check
           (search-forward "[" (treesit-node-end marker))
           (delete-char 1)
-          (insert (if (equal (treesit-node-type check) "checked") " " "X")))
+          (insert (if checked " " "X")))
          ((not remove) (forward-char 2) (insert "[ ] ")))))))
 
 (defun djot--shift-item (outward)
@@ -963,7 +983,8 @@ Change siblings together, leaving nested lists and checkboxes intact."
          (items (djot-node-children (treesit-node-parent item)))
          (text (string-trim (djot--text (djot--field item "marker"))))
          (styles '("-" "+" "*" "1." "1)" "(1)"))
-         (style (or (cadr (member text styles)) "-")) (number 0) changes)
+         (style (or (cadr (member (replace-regexp-in-string "[0-9]+" "1" text) styles)) "-"))
+         (number 0) changes)
     (when (djot--field item "term") (user-error "Definition lists use the : marker"))
     (dolist (sibling items)
       (when (equal (treesit-node-type sibling) "list_item")
@@ -979,42 +1000,47 @@ Change siblings together, leaving nested lists and checkboxes intact."
           (delete-region (car change) (cadr change))
           (insert (nth 2 change)))))))
 
+(defun djot--cell-width (beg end)
+  "Measure BEG END using base concealment only, never modern padding."
+  (let (visible)
+    (while (< beg end)
+      (unless (cl-some (lambda (ov) (and (overlay-get ov 'djot-mode)
+                                         (eq (overlay-get ov 'invisible) 'djot-markup)
+                                         (invisible-p beg)))
+                       (overlays-at beg))
+        (push (char-after beg) visible))
+      (cl-incf beg))
+    (string-width (apply #'string (nreverse visible)))))
+
 (defun djot--table-rows ()
   "Return editable rows of the parsed table at point.
-Each row is (START END PREFIX CELLS SEPARATOR BOUNDS).  Literal and escaped
-pipes are excluded using parsed inline ranges, not a regexp split."
+Each row is (START END PREFIX CELLS SEPARATOR BOUNDS WIDTHS).  Cell ranges,
+including zero-width empty cells, come directly from the pinned grammar."
   (let ((table (djot-node-at (point) "table")) rows)
     (unless (djot-node-valid-p table) (user-error "Not in a complete Djot table"))
+    (font-lock-ensure (treesit-node-start table) (treesit-node-end table))
     (dolist (node (djot-node-children table))
       (when (member (treesit-node-type node) '("table_header" "table_row" "table_separator"))
-        (let* ((start (treesit-node-start node))
+        (let* ((first-cell (car (djot-node-children node)))
+               (start (if first-cell (1- (treesit-node-start first-cell))
+                        (treesit-node-start node)))
                (end (save-excursion (goto-char start) (line-end-position)))
                (prefix (save-excursion (goto-char start)
                                        (buffer-substring-no-properties (line-beginning-position) start)))
-               (protected (mapcar (lambda (capture)
-                                    (cons (treesit-node-start (cdr capture))
-                                          (treesit-node-end (cdr capture))))
-                                  (treesit-query-capture node
-                                                        '([(verbatim) (raw_inline) (math) (backslash_escape)] @literal))))
-               pipes cells bounds)
-          (save-excursion
-            (goto-char start)
-            (while (search-forward "|" end t)
-              (let ((pos (1- (point))))
-                (unless (cl-some (lambda (range) (and (>= pos (car range)) (< pos (cdr range)))) protected)
-                  (push pos pipes)))))
-          (setq pipes (nreverse pipes))
-          (unless (and (> (length pipes) 1) (= (car pipes) start)
-                       (string-empty-p (string-trim (buffer-substring-no-properties (1+ (car (last pipes))) end))))
-            (user-error "Incomplete Djot table row"))
-          (while (cdr pipes)
-            (push (cons (1+ (car pipes)) (cadr pipes)) bounds)
-            (push (string-trim (buffer-substring-no-properties (1+ (car pipes)) (cadr pipes))) cells)
-            (setq pipes (cdr pipes)))
-          (setq cells (nreverse cells))
-          (push (list start end prefix cells
-                      (cl-every (lambda (cell) (string-match-p "\\`:?-+:?\\'" cell)) cells)
-                      (nreverse bounds)) rows))))
+               cells bounds widths)
+          (dolist (cell (djot-node-children node))
+            (let* ((beg (treesit-node-start cell)) (finish (treesit-node-end cell))
+                   (text (buffer-substring-no-properties beg finish))
+                   (trimmed (string-trim text)))
+              (push (cons beg finish) bounds)
+              (push trimmed cells)
+              (push (djot--cell-width
+                     (+ beg (- (length text) (length (string-trim-left text))))
+                     (- finish (- (length text) (length (string-trim-right text))))) widths)))
+          (unless cells (user-error "No complete table cells"))
+          (push (list start end prefix (nreverse cells)
+                      (equal (treesit-node-type node) "table_separator")
+                      (nreverse bounds) (nreverse widths)) rows))))
     (or (nreverse rows) (user-error "No table rows"))))
 
 (defun djot--table-location (rows)
@@ -1025,8 +1051,10 @@ pipes are excluded using parsed inline ranges, not a regexp split."
          (bounds (nth 5 row))
          (column (or (cl-position-if (lambda (range) (<= (point) (cdr range))) bounds)
                      (1- (length bounds))))
-         (range (nth column bounds)))
-    (list row-index column (- (point) (car range)))))
+         (range (nth column bounds))
+         (content (save-excursion (goto-char (car range))
+                                 (skip-chars-forward " \t" (cdr range)) (point))))
+    (list row-index column (- (point) content))))
 
 (defun djot--table-goto (row column &optional offset)
   "Go to COLUMN of table ROW, optionally OFFSET characters into the cell."
@@ -1034,8 +1062,10 @@ pipes are excluded using parsed inline ranges, not a regexp split."
          (entry (nth (min row (1- (length rows))) rows))
          (bounds (nth 5 entry))
          (range (nth (min column (1- (length bounds))) bounds)))
-    (goto-char (min (cdr range) (+ (car range) (or offset 0))))
-    (unless offset (skip-chars-forward " \t" (cdr range)))))
+    (goto-char (car range))
+    (skip-chars-forward " \t" (cdr range))
+    (when offset
+      (goto-char (max (1- (car range)) (min (cdr range) (+ (point) offset)))))))
 
 (defun djot--table-write (rows)
   "Replace ROWS' source with aligned cells, preserving captions and prefixes."
@@ -1044,8 +1074,8 @@ pipes are excluded using parsed inline ranges, not a regexp split."
          (alignments (make-vector count 'left)) changes)
     (dolist (row rows)
       (unless (nth 4 row)
-        (cl-loop for cell in (nth 3 row) for i from 0 do
-                 (aset widths i (max (aref widths i) (string-width cell))))))
+        (cl-loop for width in (nth 6 row) for i from 0 do
+                 (aset widths i (max (aref widths i) width)))))
     (dolist (row rows)
       (let (cells)
         (dotimes (i count)
@@ -1055,7 +1085,7 @@ pipes are excluded using parsed inline ranges, not a regexp split."
                 (let ((left (string-prefix-p ":" cell)) (right (string-suffix-p ":" cell)))
                   (aset alignments i (cond ((and left right) 'center) (right 'right) (t 'left)))
                   (push (concat (if left ":" "-") (make-string width ?-) (if right ":" "-")) cells))
-              (let* ((padding (- width (string-width cell)))
+              (let* ((padding (- width (or (nth i (nth 6 row)) 0)))
                      (left (pcase (aref alignments i) ('right padding) ('center (/ padding 2)) (_ 0))))
                 (push (concat " " (make-string left ?\s) cell (make-string (- padding left) ?\s) " ") cells)))))
         (push (list (car row) (cadr row) (concat "|" (mapconcat #'identity (nreverse cells) "|") "|")) changes)))
@@ -1067,7 +1097,8 @@ pipes are excluded using parsed inline ranges, not a regexp split."
 
 (defun djot-table-align ()
   "Align the parsed table, preserving escaped/verbatim pipes and alignment.
-Widths use source characters so source-display toggling remains usable."
+Widths use current base concealment, ignoring modern display padding.
+After changing source display, realign explicitly if desired."
   (interactive)
   (let* ((rows (djot--table-rows)) (location (djot--table-location rows))
          (origin (copy-marker (caar rows))))
@@ -1144,6 +1175,10 @@ If SEPARATOR is non-nil, insert a Djot header separator instead."
          (origin (copy-marker (caar rows))))
     (when (and delete (= count 1)) (user-error "Cannot delete the only table column"))
     (dolist (row rows)
+      (let ((widths (append (nth 6 row) (make-list (- count (length (nth 6 row))) 0))))
+        (setf (nth 6 row) (append (cl-subseq widths 0 column)
+                                  (unless delete (list 0))
+                                  (nthcdr (+ column (if delete 1 0)) widths))))
       (let ((cells (append (nth 3 row) (make-list (- count (length (nth 3 row))) ""))))
         (setf (nth 3 row) (append (cl-subseq cells 0 column)
                                   (unless delete (list (if (nth 4 row) "---" "")))
