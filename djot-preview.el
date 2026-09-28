@@ -255,13 +255,47 @@ synchronous subprocess work; unwind cleanup also runs on cancellation."
   "\\documentclass{article}\n\\usepackage[utf8]{inputenc}\n\\usepackage{amsmath,amssymb,xcolor}\n\\pagestyle{empty}\n"
   "Fixed math preamble; never derived from document code or attributes.")
 
+(defun djot--math-content (node)
+  "Return semantic math text from the trustworthy parsed NODE.
+The first line and trailing spaces are literal.  Continuation indentation
+and prefixes of actual enclosing quotes/headings belong to those blocks,
+not to the formula.  Never strip a greater-than operator beyond that depth."
+  (let ((ancestor (treesit-node-parent node)) (quotes 0) heading)
+    (while ancestor
+      (pcase (treesit-node-type ancestor)
+        ("block_quote" (cl-incf quotes))
+        ("heading" (setq heading (string-trim (djot--text (djot--field ancestor "marker"))))))
+      (setq ancestor (treesit-node-parent ancestor)))
+    (let* ((lines (split-string
+                   (replace-regexp-in-string "\r\n" "\n" (djot--text (djot--field node "content")) t t)
+                   "\n" nil))
+           (text
+            (string-join
+             (cons (car lines)
+                   (mapcar
+                    (lambda (line)
+                      (setq line (string-trim-left line "[ \t]+"))
+                      (dotimes (_ quotes)
+                        (when (string-match "\\`>[ \t]+" line)
+                          (setq line (substring line (match-end 0)))))
+                      (when (and heading
+                                 (string-match (concat "\\`" (regexp-quote heading) "[ \t]+") line))
+                        (setq line (substring line (match-end 0))))
+                      line)
+                    (cdr lines)))
+             "\n")))
+      ;; Djot removes a single spacer only beside an embedded edge backtick.
+      (when (string-prefix-p " `" text) (setq text (substring text 1)))
+      (when (string-suffix-p "` " text) (setq text (substring text 0 -1)))
+      text)))
+
 (defun djot--math-image (node)
   "Render math NODE with real LaTeX/dvisvgm, using a private session cache."
   (let* ((latex (djot--executable djot-latex-command))
          (converter (djot--executable djot-dvisvgm-command))
          (metrics (djot--preview-metrics))
          (rgb (color-name-to-rgb (car metrics)))
-         (content (djot--text (djot--field node "content")))
+         (content (djot--math-content node))
          (display (equal "$$" (djot--text (djot--field node "math_marker"))))
          (tex (concat djot--math-preamble "\\begin{document}\n"
                       (format "\\color[rgb]{%s}\n" (mapconcat (lambda (c) (format "%.6f" c)) rgb ","))

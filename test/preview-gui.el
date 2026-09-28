@@ -37,7 +37,7 @@
         (unless (zerop (ert-stats-completed-unexpected stats)) (error "Preview GUI ERT failed")))
       (let* ((default-directory (file-name-as-directory (getenv "DJOT_GUI_DIR")))
              (djot-command (getenv "DJOT_COMMAND"))
-             (source "# Explicit local previews\n\nA [local link](#Explicit-local-previews) and `code _literal_` with hidden outer markers.\n\n![Local image](local.svg)\n\nInline $`x^2+y^2=z^2` and display $$``\\frac{a}{b}=\\sqrt{c}``.\n\n## Native code remains native\n\n```elisp\n(defun square (x)\n  \"Square x.\"\n  (* x x))\n```\n\n| Code | Link |\n|---|---|\n| `literal|pipe` | [heading](#Explicit-local-previews) |\n\n`<b>Trusted local browser fixture</b>`{=html}\n")
+             (source "# Explicit local previews\n\nA [local link](#Explicit-local-previews) and `code _literal_` with hidden outer markers.\n\n![Local image](local.svg)\n\nInline $`x^2+y^2=z^2` and display $$``\\frac{a}{b}=\\sqrt{c}``.\n\n> Quoted math $$``x\n> + y``.\n\n## Native code remains native\n\n```elisp\n(defun square (x)\n  \"Square x.\"\n  (* x x))\n```\n\n| Code | Link |\n|---|---|\n| `literal|pipe` | [heading](#Explicit-local-previews) |\n\n`<b>Trusted local browser fixture</b>`{=html}\n")
              (buffer (get-buffer-create "Djot explicit previews")))
         (with-temp-file "local.svg" (insert djot-test-image))
         (switch-to-buffer buffer)
