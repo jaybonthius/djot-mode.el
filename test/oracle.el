@@ -82,4 +82,26 @@
           (error "Inline destinations differ for %S: official %S, mode %S" source oracle destinations))
         (princ (format "PASS inline %S -> %S\n" source oracle)))))
   (princ (format "%d real inline-link comparisons passed\n" (length fixtures))))
+(dolist (attributes '("{#first #last}" "{#first #last #last}"
+                      "{#first}\n{#last}" "{#first #last}\n{.class}"))
+  (let* ((source (concat attributes "\n# Heading\n\n[Heading][] [last](#last) [first](#first)\n"))
+         (official
+          (with-temp-buffer
+            (insert source)
+            (unless (zerop (call-process-region
+                            (point-min) (point-max) "node" t t nil "-e"
+                            "const d=require(process.argv[1]);const doc=d.parse(require('fs').readFileSync(0,'utf8'));process.stdout.write(JSON.stringify({target:doc.autoReferences.Heading.destination,html:d.renderHTML(doc)}));"
+                            (getenv "DJOT_ORACLE_MODULE")))
+              (error "Official ID oracle failed"))
+            (json-parse-string (buffer-string)))))
+    (with-temp-buffer
+      (insert source) (djot-mode)
+      (unless (equal (cdr (assoc "Heading" (djot--heading-references)))
+                     (gethash "target" official))
+        (error "Effective heading ID differs for %S" source))
+      (unless (and (string-match-p "id=\"last\"" (gethash "html" official))
+                   (not (string-match-p "id=\"first\"" (gethash "html" official)))
+                   (not (assoc "first" djot--anchors)))
+        (error "Superseded ID remains for %S" source)))
+    (princ (format "PASS effective ID %S -> %s\n" attributes (gethash "html" official)))))
 ;;; oracle.el ends here

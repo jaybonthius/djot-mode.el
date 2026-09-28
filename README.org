@@ -68,7 +68,7 @@ Org/markdown-style commands operate directly on Djot source, with ordinary undo.
 | C-c C-x r | Visit the explicit reference definition without opening its URL |
 | C-c C-f | Insert a numbered footnote and visit its definition; prefix supplies label |
 | C-c C-b | Return from footnote definition |
-| C-c ert | Align table without moving to another cell |
+| C-c \vert{} | Align table without moving to another cell |
 | C-c C-t i / C-c C-t d | Insert/delete table row; prefix inserts above |
 | C-c C-t c / C-c C-t k | Insert/delete table column; prefix inserts after |
 | C-c C-t - | Insert a Djot header separator below the current row |

@@ -62,8 +62,10 @@ Literal contents, escapes, malformed syntax and fenced/raw code stay visible."
     ("js" . js-mode) ("javascript" . js-mode) ("python" . python-mode)
     ("json" . js-json-mode) ("c" . c-mode) ("cpp" . c++-mode)
     ("html" . html-mode) ("css" . css-mode) ("ruby" . ruby-mode))
-  "Code language aliases to fontification major modes.
-Other languages use LANGUAGE-mode if that function is available."
+  "Trusted code language aliases to fontification major modes.
+Only these functions may be called by document language tags.  Unknown
+languages retain fixed-pitch text.  Customize this list only with trusted
+major modes; it is deliberately not safe as a file-local variable."
   :type '(alist :key-type string :value-type function) :group 'djot)
 
 (defface djot-heading-1 '((t :inherit outline-1)) "Level one heading." :group 'djot)
@@ -315,8 +317,7 @@ configured document display.  Moving point never changes this setting."
   (when-let* ((code (djot--field node "code")))
     (djot--face code 'djot-code start end t)
     (let* ((language (djot--text (djot--field node "language")))
-           (mode (or (cdr (assoc language djot-language-modes))
-                     (intern-soft (concat language "-mode")))))
+           (mode (cdr (assoc language djot-language-modes))))
       (when (and djot-src-fontify-natively mode (fboundp mode)
                  (not (memq mode '(djot-mode text-mode))))
         (let ((target (current-buffer))
@@ -472,8 +473,8 @@ definition rather than opening a silently truncated URL."
        (djot--text destination)))))
 
 (defun djot--attribute-id (node)
-  "Return the first identifier within attribute NODE, if any."
-  (when-let* ((identifier (car (treesit-query-capture node '((identifier) @id)))))
+  "Return the effective (last) identifier within attribute NODE, if any."
+  (when-let* ((identifier (car (last (treesit-query-capture node '((identifier) @id))))))
     (substring (djot--text (cdr identifier)) 1)))
 
 (defun djot--ensure-index ()
@@ -490,8 +491,9 @@ Only plain strings and positions survive the query; no nodes are cached."
          (lambda (node)
            (when (djot-node-valid-p node)
              (pcase (treesit-node-type node)
-               ("identifier"
-                (push (cons (substring (djot--text node) 1) (treesit-node-start node)) djot--anchors))
+               ("inline_attribute"
+                (when-let* ((id (djot--attribute-id node)))
+                  (push (cons id (treesit-node-start node)) djot--anchors)))
                ("block_attribute" (push node attributes))
                ("heading" (push node headings))
                ("link_reference_definition"
@@ -500,7 +502,19 @@ Only plain strings and positions survive the query; no nodes are cached."
                   (setf (alist-get label djot--references nil nil #'equal)
                         (and (djot--reference-supported-p node)
                              (djot--reference-url node))))))))
-         nil nil '("identifier" "block_attribute" "heading" "link_reference_definition"))
+         nil nil '("inline_attribute" "block_attribute" "heading" "link_reference_definition"))
+        ;; Consecutive block attributes share one target; only its last ID
+        ;; exists, including when an earlier attribute supplied another ID.
+        (let ((pending (reverse attributes)))
+          (while pending
+            (let* ((attribute (pop pending))
+                   (position (treesit-node-start attribute))
+                   (id (djot--attribute-id attribute)))
+              (while (and pending (= (treesit-node-end attribute)
+                                     (treesit-node-start (car pending))))
+                (setq attribute (pop pending)
+                      id (or (djot--attribute-id attribute) id)))
+              (when id (push (cons id position) djot--anchors)))))
         (dolist (node (nreverse headings))
           (let* ((label (djot--normalize-label (djot--plain-text (djot--field node "content"))))
                  (base (replace-regexp-in-string
@@ -596,7 +610,8 @@ Unsafe executable URL schemes are rejected, never evaluated."
      ((string-prefix-p "footnote:" destination)
       (djot--goto-footnote (substring destination 9)))
      ((string-prefix-p "#" destination)
-      (djot--goto-anchor (url-unhex-string (substring destination 1))))
+      (djot--goto-anchor (decode-coding-string
+                         (url-unhex-string (substring destination 1)) 'utf-8)))
      ((string-match-p "\\`\\(?:https?\\|mailto\\|ftp\\):" destination)
       (browse-url destination))
      ((and (string-match-p "\\`[[:alpha:]][[:alnum:]+.-]*:" destination)
@@ -615,7 +630,7 @@ Unsafe executable URL schemes are rejected, never evaluated."
         (when (file-remote-p path) (user-error "Remote file visits are not supported"))
         (find-file path)
         (when (and anchor (derived-mode-p 'djot-mode))
-          (djot--goto-anchor (url-unhex-string anchor))))))))
+          (djot--goto-anchor (decode-coding-string (url-unhex-string anchor) 'utf-8))))))))
 
 (defun djot-open-at-mouse (event)
   "Open the link at mouse EVENT."

@@ -21,6 +21,67 @@
   (let ((value (get-text-property position 'face)))
     (or (eq value face) (memq face value))))
 
+(ert-deftest djot-mode-native-language-trust ()
+  ;; This suite runs in a fresh -Q process; never change the user's session.
+  (require 'autorevert)
+  (require 'python)
+  (let* ((called nil)
+         (python-mode-hook (list (lambda () (setq called t)))))
+    (unwind-protect
+        (progn
+          (should-not global-auto-revert-mode)
+          (djot-test-with "```global-auto-revert\nx\n```\n"
+            (should-not global-auto-revert-mode))
+          (cl-letf (((symbol-function 'djot-test-unapproved-mode)
+                     (lambda () (setq called t))))
+            (djot-test-with "```djot-test-unapproved\nx\n```\n"
+              (should-not called)))
+          (djot-test-with "```python\n@cache\ndef f():\n    pass\n```\n"
+            (search-forward "@cache")
+            (should (djot-test-face-p (- (point) 6) 'font-lock-type-face))
+            (should-not called))
+          (let ((djot-language-modes '(("trusted" . emacs-lisp-mode))))
+            (djot-test-with "```trusted\n(defun hello ())\n```\n"
+              (search-forward "defun")
+              (should (djot-test-face-p (1- (point)) 'font-lock-keyword-face)))))
+      (global-auto-revert-mode -1))))
+
+(ert-deftest djot-mode-utf8-fragment-public-command ()
+  (djot-test-with "# café\n\n[go](#caf%C3%A9)\n"
+    (search-forward "go") (backward-char)
+    (djot-open-at-point)
+    (should (= (point) (point-min))))
+  (let* ((directory (make-temp-file "djot-unicode-" t))
+         (file (expand-file-name "café.djot" directory))
+         target)
+    (unwind-protect
+        (progn
+          (with-temp-file file (insert "# café\n\nExisting target\n"))
+          (djot-test-with "[go](caf%C3%A9.djot#caf%C3%A9)\n"
+            (setq default-directory (file-name-as-directory directory))
+            (search-forward "go") (backward-char)
+            (djot-open-at-point)
+            (setq target (current-buffer))
+            (should (file-equal-p buffer-file-name file))
+            (should (equal (buffer-string) "# café\n\nExisting target\n"))
+            (should (= (point) (point-min)))))
+      (when (buffer-live-p target) (kill-buffer target))
+      (delete-directory directory t))))
+
+(ert-deftest djot-mode-effective-heading-id ()
+  (dolist (attributes '("{#first #last}" "{#first #last #last}"
+                        "{#first}\n{#last}"))
+    (djot-test-with (concat attributes "\n# Heading\n\n[Heading][] [last](#last) [first](#first)\n")
+      (search-forward "[Heading]") (backward-char 2)
+      (should (equal (djot-link-destination (djot--link-at-point)) "#last"))
+      (djot-open-at-point)
+      (should (looking-at "# Heading"))
+      (search-forward "[last]") (backward-char 2)
+      (djot-open-at-point)
+      (should (looking-at "# Heading"))
+      (search-forward "[first]") (backward-char 2)
+      (should-error (djot-open-at-point) :type 'user-error))))
+
 (ert-deftest djot-mode-association-and-single-parser ()
   (should (eq (assoc-default "note.djot" auto-mode-alist #'string-match) 'djot-mode))
   (djot-test-with "# One\n\n## Two\n\n### Three\n\n#### Four\n\n##### Five\n\n###### Six\n"
