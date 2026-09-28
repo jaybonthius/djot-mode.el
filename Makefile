@@ -15,7 +15,7 @@ test:
 oracle:
 	$(BATCH) -l test/oracle.el
 edit-oracle:
-	$(BATCH) -l test/edit-oracle.el
+	$(BATCH) -L test -l test/edit-oracle.el
 benchmark:
 	$(BATCH) -l test/benchmark.el
 clean:

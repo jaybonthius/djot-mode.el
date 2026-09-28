@@ -330,5 +330,76 @@
     (djot-cycle)
     (should-not (invisible-p (1- (point-max))))))
 
+
+(ert-deftest djot-heading-container-folds-stop-at-siblings ()
+  (dolist (source '("::: note\n## One\n\nbody\n\n## Two\n\nbody\n:::\n\noutside\n"
+                    "::: note\n## One\n\nbody\n\n# Two\n\nbody\n:::\n\noutside\n"
+                    "> ## One\n>\n> body\n>\n> ## Two\n>\n> body\n\noutside\n"
+                    "::: outer\n:::: inner\n## One\n\nbody\n\n## Two\n\nbody\n::::\n:::\n\noutside\n"))
+    (djot-test-with source
+      (let ((original (buffer-string)))
+        (buffer-enable-undo)
+        (setq buffer-undo-list nil)
+        (search-forward "One")
+        (djot-cycle)
+        (search-forward "body")
+        (should (invisible-p (1- (point))))
+        (should-error (insert "unsafe") :type 'user-error)
+        (search-forward "Two")
+        (should-not (invisible-p (1- (point))))
+        (search-forward "outside")
+        (should-not (invisible-p (1- (point))))
+        (should (equal original (buffer-string)))
+        (should-not buffer-undo-list)))))
+
+(ert-deftest djot-heading-container-subtree-keeps-child-until-next-sibling ()
+  (djot-test-with "::: outer\n## One\n\nbody\n\n### Child\n\nchild body\n\n## Two\n\nbody\n:::\n"
+    (search-forward "One") (djot-cycle)
+    (search-forward "Child")
+    (should (invisible-p (1- (point))))
+    (goto-char 1) (search-forward "One") (djot-cycle)
+    (search-forward "Child")
+    (should-not (invisible-p (1- (point))))
+    (search-forward "child body")
+    (should (invisible-p (1- (point))))
+    (search-forward "Two")
+    (should-not (invisible-p (1- (point))))))
+
+
+(defun djot-test-container (body context final-newline)
+  "Wrap BODY in CONTEXT, preserving FINAL-NEWLINE when requested."
+  (let ((text (pcase context
+                ('plain body)
+                ('div (concat "::: note\n" body ":::\n"))
+                ('list (concat "- container\n\n"
+                               (replace-regexp-in-string "^\\(.+\\)$" "  \\1" body)))
+                ('quote (concat (replace-regexp-in-string "^" "> " (string-remove-suffix "\n" body)) "\n"))
+                ('nested-quote (concat (replace-regexp-in-string "^" "> > " (string-remove-suffix "\n" body)) "\n")))))
+    (if final-newline text (string-trim-right text "\n"))))
+
+(ert-deftest djot-editing-container-boundary-matrix ()
+  (dolist (context '(plain div list quote nested-quote))
+    (dolist (final-newline '(nil t))
+      (ert-info ((format "Context %s, final newline %S" context final-newline))
+        (djot-test-with (djot-test-container
+                        "# One\n\nbody\n\n## Child\n\nchild body\n\n# Two\n\nbody\n" context final-newline)
+          (should (= 3 (length (djot--heading-entries))))
+          (search-forward "One") (djot-cycle)
+          (search-forward "Child")
+          (should (invisible-p (1- (point))))
+          (search-forward "Two")
+          (should-not (invisible-p (1- (point))))
+          (djot-show-all))
+        (djot-test-with (djot-test-container
+                        "|a||`b|c`|\n|---|---|---:|\n|d||e|\n\n^ caption\n  continued\n" context final-newline)
+          (should (= 1 (length (treesit-query-capture (treesit-parser-root-node djot-parser) '((table) @table)))))
+          (let ((captions (treesit-query-capture (treesit-parser-root-node djot-parser) '((table_caption) @caption))))
+            (should (= 1 (length captions)))
+            (should (string-match-p "continued" (djot--text (cdar captions)))))
+          (search-forward "|a")
+          (djot-table-align)
+          (should (= 3 (length (djot--table-rows))))
+          (should (cl-every (lambda (row) (= 3 (length (nth 3 row)))) (djot--table-rows))))))))
+
 (provide 'djot-edit-test)
 ;;; djot-edit-test.el ends here

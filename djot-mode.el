@@ -618,10 +618,20 @@ Unsafe executable URL schemes are rejected, never evaluated."
     (djot-map-nodes
      (lambda (node)
        (when (djot-node-valid-p node)
-         (let ((section (treesit-node-parent node)))
-           (push (list (treesit-node-start node) (treesit-node-end node)
-                       (length (string-trim (djot--text (djot--field node "marker"))))
-                       (treesit-node-end section)) entries))))
+         (let* ((container (treesit-node-parent node))
+                (level (length (string-trim (djot--text (djot--field node "marker")))))
+                (end (treesit-node-end container)))
+           ;; Only top-level headings have section parents.  Within a div,
+           ;; quote or list, same/higher-level sibling headings bound the
+           ;; subtree; headings inside a nested container do not.
+           (unless (equal (treesit-node-type container) "section")
+             (let ((sibling (treesit-node-next-sibling node t)))
+               (while sibling
+                 (if (and (equal (treesit-node-type sibling) "heading")
+                          (<= (length (string-trim (djot--text (djot--field sibling "marker")))) level))
+                     (setq end (treesit-node-start sibling) sibling nil)
+                   (setq sibling (treesit-node-next-sibling sibling t))))))
+           (push (list (treesit-node-start node) (treesit-node-end node) level end) entries))))
      nil nil '("heading"))
     (nreverse entries)))
 

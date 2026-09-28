@@ -11,11 +11,11 @@ Put this directory on =load-path=, then configure the real Djot grammar:
 (require 'djot-mode)
 (add-to-list 'treesit-language-source-alist
              '(djot "https://github.com/jaybonthius/tree-sitter-djot"
-                     "48541762892a7c0a25d16466d64e01408d79bbe4"))
+                     "15b9d44f4f2030ba0911d1507514350e376a9136"))
 ;; Once: M-x treesit-install-language-grammar RET djot RET
 #+end_src
 
-Grammar installation needs Git and a C/C++ compiler.  Emacs loads the installed shared library from its =tree-sitter= directory; use =treesit-extra-load-path= for another location.  =.djot= and =.dj= files select =djot-mode=.  Loading the package needs no renderer, browser, LaTeX installation, or modern package. Activation reports a useful error if the grammar is missing; it does not use a second, approximate parser.  The pinned fork is based on maintained upstream =https://codeberg.org/treeman/tree-sitter-djot= at =ed551f3= and corrects multiline reference destinations, inline URL continuation lookahead, empty table cells, EOF and indented table rows, quoted captions, and falsely recognized ordered-list markers. Existing older grammars remain usable for their supported syntax, but the mode detects missing destination-chunk support and refuses potentially truncated reference targets.  Reinstall the pinned grammar and restart Emacs to load the new library; loading another revision in the same Emacs process is not reliable.
+Grammar installation needs Git and a C/C++ compiler.  Emacs loads the installed shared library from its =tree-sitter= directory; use =treesit-extra-load-path= for another location.  =.djot= and =.dj= files select =djot-mode=.  Loading the package needs no renderer, browser, LaTeX installation, or modern package. Activation reports a useful error if the grammar is missing; it does not use a second, approximate parser.  The pinned fork is based on maintained upstream =https://codeberg.org/treeman/tree-sitter-djot= at =ed551f3= and corrects multiline reference destinations, inline URL continuation lookahead, empty table cells, EOF and indented table rows, nested/multiline quoted captions, quoted heading boundaries, and falsely recognized ordered-list markers. Existing older grammars remain usable for their supported syntax, but the mode detects missing destination-chunk support and refuses potentially truncated reference targets.  Reinstall the pinned grammar and restart Emacs to load the new library; loading another revision in the same Emacs process is not reliable.
 
 * Document display
 
