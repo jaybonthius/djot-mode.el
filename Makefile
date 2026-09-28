@@ -3,7 +3,7 @@ GRAMMAR_DIR ?=
 BATCH = $(EMACS) -Q --batch -L . --eval '(when (getenv "GRAMMAR_DIR") (add-to-list (quote treesit-extra-load-path) (getenv "GRAMMAR_DIR")))'
 export GRAMMAR_DIR
 
-.PHONY: check compile checkdoc test oracle edit-oracle preview-oracle benchmark clean
+.PHONY: check compile checkdoc test oracle edit-oracle preview-oracle code-oracle benchmark clean
 check: compile checkdoc test
 compile:
 	$(BATCH) --eval '(setq byte-compile-error-on-warn t)' -f batch-byte-compile djot-mode.el djot-preview.el
@@ -18,6 +18,8 @@ edit-oracle:
 	$(BATCH) -L test -l test/edit-oracle.el
 preview-oracle:
 	$(BATCH) -l test/preview-oracle.el
+code-oracle:
+	$(BATCH) -l test/code-oracle.el
 benchmark:
 	$(BATCH) -l test/benchmark.el
 clean:

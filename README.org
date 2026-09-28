@@ -11,11 +11,11 @@ Put this directory on =load-path=, then configure the real Djot grammar:
 (require 'djot-mode)
 (add-to-list 'treesit-language-source-alist
              '(djot "https://github.com/jaybonthius/tree-sitter-djot"
-                     "83235e0e7c640d8400229d419592fc7daa8848c8"))
+                     "3025cd0c9fe0c0b27030725fbec27f8cab98b241"))
 ;; Once: M-x treesit-install-language-grammar RET djot RET
 #+end_src
 
-Grammar installation needs Git and a C/C++ compiler.  Emacs loads the installed shared library from its =tree-sitter= directory; use =treesit-extra-load-path= for another location.  =.djot= and =.dj= files select =djot-mode=.  Loading the package needs no renderer, browser, LaTeX installation, or modern package. Activation reports a useful error if the grammar is missing; it does not use a second, approximate parser.  The pinned fork is based on maintained upstream =https://codeberg.org/treeman/tree-sitter-djot= at =ed551f3= and corrects multiline reference destinations, inline URL continuation lookahead, empty table cells, EOF and indented table rows, nested/multiline quoted captions, quoted heading boundaries, falsely recognized ordered-list markers, display math in inline/EOF positions, and verbatim/math termination at containing heading/list/quote boundaries. Existing older grammars remain usable for their supported syntax, but the mode detects missing destination-chunk support and refuses potentially truncated reference targets.  Reinstall the pinned grammar and restart Emacs to load the new library; loading another revision in the same Emacs process is not reliable.
+Grammar installation needs Git and a C/C++ compiler.  Emacs loads the installed shared library from its =tree-sitter= directory; use =treesit-extra-load-path= for another location.  =.djot= and =.dj= files select =djot-mode=.  Loading the package needs no renderer, browser, LaTeX installation, or modern package. Activation reports a useful error if the grammar is missing; it does not use a second, approximate parser.  The pinned fork is based on maintained upstream =https://codeberg.org/treeman/tree-sitter-djot= at =ed551f3= and corrects multiline reference destinations, inline URL continuation lookahead, empty table cells, EOF and indented table rows, nested/multiline quoted captions, quoted heading boundaries, falsely recognized ordered-list markers, display math in inline/EOF positions, verbatim/math termination at containing heading/list/quote boundaries, and bare code closers (including longer fences) in containers and at EOF. Existing older grammars remain usable for their supported syntax, but the mode detects missing destination-chunk support and refuses potentially truncated reference targets.  Reinstall the pinned grammar and restart Emacs to load the new library; loading another revision in the same Emacs process is not reliable.
 
 * Document display
 
@@ -32,7 +32,7 @@ As in Org, links are descriptive by default, while emphasis markers remain visib
 ;; (add-hook 'djot-mode-hook #'djot-modern-mode)
 #+end_src
 
-The base mode inherits theme =outline-1= through =outline-6= colors.  Code is fixed-pitch and fontified by its real Emacs language mode; =elisp= aliases =emacs-lisp-mode=.  Customize =djot-language-modes= for more aliases.  Raw blocks are literal, never language-fontified.  Unknown languages remain readable fixed-pitch source.  No document code, file-local variables, or source mode hooks are run while highlighting.
+The base mode inherits theme =outline-1= through =outline-6= colors.  Code is fixed-pitch and fontified by its real Emacs language mode; =elisp= aliases =emacs-lisp-mode=.  Only the trusted =djot-language-modes= mapping selects native major modes; customize it for additional trusted languages.  Raw blocks are literal, never language-fontified.  Unknown languages remain readable fixed-pitch source.  No document code, file-local variables, or source mode hooks are run while highlighting.
 
 | Key       | Command / result                                      |
 |-----------+-------------------------------------------------------|

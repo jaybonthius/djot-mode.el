@@ -312,6 +312,32 @@ configured document display.  Moving point never changes this setting."
      ((and node (equal (treesit-node-type node) "autolink"))
       (goto-char (1+ (treesit-node-start node)))))))
 
+(defun djot--code-segments (node)
+  "Return source ranges containing NODE's semantic code, in line order.
+Only parser-confirmed quote prefixes and indentation up to the opening
+fence column are removed.  Retain native indentation and literal operators.
+Each (BEG . END) range includes its newline and maps directly back to source."
+  (when-let* ((code (djot--field node "code")))
+    (save-excursion
+      (goto-char (treesit-node-start node))
+      (skip-chars-forward " \t")
+      (let ((indent (current-column))
+            (markers (djot-node-children code))
+            (end (treesit-node-end code)) segments)
+        (goto-char (treesit-node-start code))
+        (while (< (point) end)
+          (let ((finish (min end (1+ (line-end-position)))))
+            (while (and markers (< (treesit-node-start (car markers)) finish))
+              (let ((marker (pop markers)))
+                (when (equal (treesit-node-type marker) "block_quote_marker")
+                  (goto-char (treesit-node-end marker)))))
+            (while (and (< (point) finish) (< (current-column) indent)
+                        (memq (char-after) '(?\s ?\t)))
+              (forward-char))
+            (push (cons (point) finish) segments)
+            (goto-char finish)))
+        (nreverse segments)))))
+
 (defun djot--fontify-code (node start end)
   "Natively fontify NODE's code, clipping copied faces to START END."
   (when-let* ((code (djot--field node "code")))
@@ -320,25 +346,32 @@ configured document display.  Moving point never changes this setting."
            (mode (cdr (assoc language djot-language-modes))))
       (when (and djot-src-fontify-natively mode (fboundp mode)
                  (not (memq mode '(djot-mode text-mode))))
-        (let ((target (current-buffer))
-              (offset (1- (treesit-node-start code))))
+        (let* ((target (current-buffer))
+               (segments (djot--code-segments node))
+               (text (mapconcat (lambda (range)
+                                  (buffer-substring-no-properties (car range) (cdr range)))
+                                segments "")))
           (with-temp-buffer
-            (insert (djot--text code))
-            ;; Run the mode, not document locals, hooks or executable forms.
+            (insert text)
+            ;; Run only the trusted mode, never locals, hooks or document forms.
             (let ((enable-local-variables nil) (enable-local-eval nil))
               (delay-mode-hooks (funcall mode)))
             (font-lock-ensure)
             (let ((pos (point-min)))
-              (while (< pos (point-max))
-                (let* ((next (next-single-property-change pos 'face nil (point-max)))
-                       (face (or (get-text-property pos 'face)
-                                 (get-text-property pos 'font-lock-face)))
-                       (beg (max start (+ offset pos)))
-                       (finish (min end (+ offset next))))
-                  (when (and face (< beg finish))
-                    (with-current-buffer target
-                      (treesit-fontify-with-override beg finish face 'prepend)))
-                  (setq pos next))))))))))
+              (dolist (range segments)
+                (let ((limit (+ pos (- (cdr range) (car range))))
+                      (offset (- (car range) pos)))
+                  (while (< pos limit)
+                    (let* ((next (min (next-single-property-change pos 'face nil limit)
+                                      (next-single-property-change pos 'font-lock-face nil limit)))
+                           (face (or (get-text-property pos 'face)
+                                     (get-text-property pos 'font-lock-face)))
+                           (beg (max start (+ offset pos)))
+                           (finish (min end (+ offset next))))
+                      (when (and face (< beg finish))
+                        (with-current-buffer target
+                          (treesit-fontify-with-override beg finish face 'prepend)))
+                      (setq pos next))))))))))))
 
 (defvar djot-link-map
   (let ((map (make-sparse-keymap)))
