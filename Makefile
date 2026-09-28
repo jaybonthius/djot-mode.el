@@ -11,7 +11,7 @@ checkdoc:
 	$(BATCH) -l test/checkdoc.el
 
 test:
-	$(BATCH) -l test/djot-mode-test.el -f ert-run-tests-batch-and-exit
+	$(BATCH) -L test -l test/djot-edit-test.el -f ert-run-tests-batch-and-exit
 oracle:
 	$(BATCH) -l test/oracle.el
 benchmark:

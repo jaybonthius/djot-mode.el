@@ -535,7 +535,7 @@ _BEG, _END and _OLD-LENGTH are the standard change-hook arguments."
     (unless position (user-error "No Djot anchor: %s" id))
     (push-mark)
     (goto-char position)
-    (when (invisible-p (point)) (outline-show-entry))))
+    (djot--reveal-position)))
 
 (defun djot--goto-footnote (label)
   "Visit footnote definition LABEL, remembering the reference location."
@@ -548,14 +548,16 @@ _BEG, _END and _OLD-LENGTH are the standard change-hook arguments."
     (unless position (user-error "No Djot footnote: %s" label))
     (setq djot--footnote-return (point-marker))
     (push-mark)
-    (goto-char position)))
+    (goto-char position)
+    (djot--reveal-position)))
 
 (defun djot-footnote-return ()
   "Return to the reference from which a footnote was opened."
   (interactive)
   (unless (and (markerp djot--footnote-return) (marker-buffer djot--footnote-return))
     (user-error "No footnote reference to return to"))
-  (goto-char djot--footnote-return))
+  (goto-char djot--footnote-return)
+  (djot--reveal-position))
 
 (defun djot-open-at-point ()
   "Open the link at point, or jump to its local anchor or footnote.
@@ -598,6 +600,708 @@ Unsafe executable URL schemes are rejected, never evaluated."
   (mouse-set-point event)
   (djot-open-at-point))
 
+;;; Structured editing
+;; Org's cycle/list/table commands and markdown-mode's contextual RET are
+;; interaction references.  All structural boundaries here come from Djot.
+
+(defun djot--heading-entries ()
+  "Return parsed heading entries (START END LEVEL SECTION-END)."
+  (let (entries)
+    (djot-map-nodes
+     (lambda (node)
+       (when (djot-node-valid-p node)
+         (let ((section (treesit-node-parent node)))
+           (push (list (treesit-node-start node) (treesit-node-end node)
+                       (length (string-trim (djot--text (djot--field node "marker"))))
+                       (treesit-node-end section)) entries))))
+     nil nil '("heading"))
+    (nreverse entries)))
+
+(defun djot--current-heading ()
+  "Return the heading entry enclosing point, or signal a user error."
+  (or (car (last (cl-remove-if-not
+                 (lambda (entry) (and (<= (car entry) (point))
+                                      (< (point) (nth 3 entry))))
+                 (djot--heading-entries))))
+      (user-error "No Djot heading here")))
+
+(defun djot--folds (beg end)
+  "Return only Djot fold overlays intersecting BEG END."
+  (cl-remove-if-not (lambda (ov) (overlay-get ov 'djot-fold))
+                    (overlays-in beg end)))
+
+(defun djot--reveal-position ()
+  "Reveal the fold at point after an explicit navigation command."
+  (dolist (ov (djot--folds (point) (point))) (delete-overlay ov)))
+
+(defun djot--fold (beg end)
+  "Fold BEG through END without touching semantic display overlays."
+  (when (< beg end)
+    (let ((ov (make-overlay beg end nil t nil)))
+      (overlay-put ov 'djot-fold t)
+      (overlay-put ov 'invisible 'djot-fold)
+      (overlay-put ov 'isearch-open-invisible #'delete-overlay)
+      (overlay-put ov 'evaporate t))))
+
+(defun djot--guard-folded-edit (beg end)
+  "Reject edits to folded source between BEG and END, like Org."
+  (unless undo-in-progress
+    (when (djot--folds beg end)
+      (user-error "Folded Djot source: unfold with TAB or C-c C-a before editing"))))
+
+(defun djot-show-all ()
+  "Show every Djot heading body without changing markup concealment."
+  (interactive)
+  (dolist (ov (djot--folds (point-min) (point-max))) (delete-overlay ov)))
+
+(defun djot-cycle ()
+  "Cycle this heading through folded, children and fully open states."
+  (interactive)
+  (pcase-let* ((`(,beg ,head-end ,level ,end) (djot--current-heading))
+               (body (max beg (1- head-end)))
+               (folds (djot--folds body end))
+               (closed (cl-find-if (lambda (ov) (and (= (overlay-start ov) body)
+                                                     (= (overlay-end ov) end))) folds)))
+    (cond
+     (closed
+      (mapc #'delete-overlay folds)
+      (let ((children (cl-remove-if-not
+                       (lambda (entry) (and (> (car entry) beg) (< (car entry) end)
+                                            (= (nth 2 entry) (1+ level))))
+                       (djot--heading-entries))))
+        (when children
+          (djot--fold body (caar children))
+          (dolist (entry children)
+            (djot--fold (1- (nth 1 entry)) (nth 3 entry))))))
+     (folds (mapc #'delete-overlay folds))
+     (t (djot--fold body end)))))
+
+(defun djot-cycle-global ()
+  "Toggle between a heading overview and the fully visible document."
+  (interactive)
+  (if (djot--folds (point-min) (point-max)) (djot-show-all)
+    (dolist (entry (djot--heading-entries))
+      (djot--fold (1- (nth 1 entry))
+                  (or (car (cl-find-if (lambda (next) (> (car next) (car entry)))
+                                       (djot--heading-entries)))
+                      (point-max))))))
+
+(defun djot-next-heading (&optional backward)
+  "Move to the next parsed heading; with BACKWARD, move to the previous."
+  (interactive)
+  (let* ((entries (djot--heading-entries))
+         (entry (cl-find-if (lambda (item) (if backward (< (car item) (point))
+                                            (> (car item) (point))))
+                            (if backward (reverse entries) entries))))
+    (unless entry (user-error "No %s Djot heading" (if backward "previous" "next")))
+    (goto-char (car entry))
+    (djot--reveal-position)))
+
+(defun djot-previous-heading ()
+  "Move to the previous parsed heading, ignoring literal code."
+  (interactive)
+  (djot-next-heading t))
+
+(defun djot-up-heading ()
+  "Move to the parent of the current parsed heading."
+  (interactive)
+  (let* ((current (djot--current-heading))
+         (parent (cl-find-if (lambda (entry) (and (< (car entry) (car current))
+                                                 (< (nth 2 entry) (nth 2 current))
+                                                 (> (nth 3 entry) (car current))))
+                             (reverse (djot--heading-entries)))))
+    (unless parent (user-error "No parent heading"))
+    (goto-char (car parent))
+    (djot--reveal-position)))
+
+(defun djot--change-heading-level (delta)
+  "Change the current heading and its descendants by DELTA levels."
+  (let* ((current (djot--current-heading))
+         (entries (cl-remove-if-not
+                   (lambda (entry) (and (>= (car entry) (car current))
+                                        (< (car entry) (nth 3 current))))
+                   (djot--heading-entries))) changes)
+    (when (< (+ (nth 2 current) delta) 1) (user-error "Already a top-level heading"))
+    (dolist (entry entries)
+      (let ((node (djot-node-at (car entry) "heading")))
+        (dolist (capture (treesit-query-capture node '((marker) @marker)))
+          (let ((marker (cdr capture)))
+            (push (cons (treesit-node-start marker) (treesit-node-end marker)) changes)))))
+    (atomic-change-group
+      (save-excursion
+        (dolist (range (sort changes (lambda (a b) (> (car a) (car b)))))
+          (goto-char (car range))
+          (if (> delta 0) (insert "#") (delete-char 1)))))))
+
+(defun djot-promote-heading ()
+  "Promote this heading and all its descendants by one level."
+  (interactive)
+  (djot--change-heading-level -1))
+
+(defun djot-demote-heading ()
+  "Demote this heading and all its descendants by one level."
+  (interactive)
+  (djot--change-heading-level 1))
+
+(defun djot--item-at-point ()
+  "Return a validated list item at point, guarding old scanner defects."
+  (let* ((node (djot-node-at (if (eobp) (max (point-min) (1- (point))) (point)) "list_item"))
+         (marker (and node (djot--field node "marker")))
+         (text (and marker (string-trim (djot--text marker)))))
+    (when (and (djot-node-valid-p node) marker
+               ;; Some grammars accept arbitrary words as Roman markers.
+               (or (not (string-match-p "roman" (treesit-node-type marker)))
+                   (string-match-p "\\`(?[ivxlcdmIVXLCDM]+[.)]\\'" text)))
+      ;; The grammar can misclassify lazy paragraph continuation as a
+      ;; nested list.  Only a blank-separated nested block is editable.
+      (let ((candidate node) ancestor)
+        (while candidate
+          (let* ((list-node (treesit-node-parent candidate))
+                 (container (treesit-node-parent list-node))
+                 (first (car (djot-node-children list-node)))
+                 (nested (and container
+                              (equal (treesit-node-type container) "list_item_content"))))
+            (setq ancestor (and nested (treesit-node-parent container)))
+            (when (and ancestor first
+                       (save-excursion
+                         (goto-char (treesit-node-start (djot--field first "marker")))
+                         (forward-line -1)
+                         (not (looking-at-p "[ \t>]*$"))))
+              (setq node ancestor))
+            (setq candidate ancestor))))
+      node)))
+
+(defun djot--item-prefix (item)
+  "Return source before ITEM's marker, including quote and indent prefixes."
+  (save-excursion
+    (goto-char (treesit-node-start (djot--field item "marker")))
+    (buffer-substring-no-properties (line-beginning-position) (point))))
+
+(defun djot--roman (number)
+  "Return the canonical lowercase Roman representation of NUMBER."
+  (let ((result ""))
+    (dolist (pair '((1000 . "m") (900 . "cm") (500 . "d") (400 . "cd")
+                    (100 . "c") (90 . "xc") (50 . "l") (40 . "xl")
+                    (10 . "x") (9 . "ix") (5 . "v") (4 . "iv") (1 . "i")))
+      (while (>= number (car pair))
+        (setq result (concat result (cdr pair)) number (- number (car pair)))))
+    result))
+
+(defun djot--next-list-marker (marker)
+  "Return MARKER's successor, preserving its parsed style."
+  (let* ((type (treesit-node-type marker))
+         (text (string-trim-right (djot--text marker)))
+         (token (replace-regexp-in-string "[().]" "" text))
+         (case-fold-search nil) value)
+    (cond
+     ((equal type "list_marker_task") (concat (substring text 0 1) " [ ]"))
+     ((string-match-p "decimal" type)
+      (replace-regexp-in-string "[0-9]+" (number-to-string (1+ (string-to-number token))) text))
+     ((string-match-p "roman" type)
+      (let ((previous 0) (number 0))
+        (dolist (char (reverse (string-to-list (downcase token))))
+          (setq value (cdr (assq char '((?i . 1) (?v . 5) (?x . 10) (?l . 50)
+                                       (?c . 100) (?d . 500) (?m . 1000)))))
+          (setq number (+ number (if (< value previous) (- value) value))
+                previous value))
+        (setq value (djot--roman (1+ number)))
+        (when (string-match-p "upper" type) (setq value (upcase value)))
+        (replace-regexp-in-string "[[:alpha:]]+" value text t t)))
+     ((string-match-p "alpha" type)
+      (setq value (string (if (memq (aref token 0) '(?z ?Z))
+                             (- (aref token 0) 25) (1+ (aref token 0)))))
+      (replace-regexp-in-string "[[:alpha:]]" value text t t))
+     (t text))))
+
+(defun djot-insert-item ()
+  "Insert a sibling item, continuing numbering and resetting checkboxes.
+Split at point within ordinary item text.  From a definition's body or a
+nested block, insert after the whole item.  On an empty item, end the list."
+  (interactive)
+  (let* ((item (or (djot--item-at-point) (user-error "Not in a complete Djot list item")))
+         (marker (djot--field item "marker"))
+         (start (treesit-node-start marker)) (marker-end (treesit-node-end marker))
+         (end (treesit-node-end item))
+         (prefix (djot--item-prefix item))
+         (next (djot--next-list-marker marker))
+         (definition (djot--field item "term"))
+         (empty (string-empty-p (string-trim (buffer-substring-no-properties marker-end end)))))
+    (atomic-change-group
+      (cond
+       (empty
+        (delete-region start marker-end)
+        (goto-char start))
+       ((or definition (< (point) marker-end)
+            (djot-node-at (point) "code_block") (djot-node-at (point) "table"))
+        (goto-char end)
+        (unless (bolp) (insert "\n"))
+        (when definition (insert prefix "\n"))
+        (insert prefix next " "))
+       (t
+        (delete-horizontal-space)
+        (insert "\n" prefix next " "))))))
+
+(defun djot--empty-item-marker ()
+  "Return a parsed marker on an otherwise empty item line, even at EOF."
+  (let ((node (djot-node-at (max (line-beginning-position) (1- (point))))))
+    (while (and node (not (string-prefix-p "list_marker_" (treesit-node-type node))))
+      (setq node (treesit-node-parent node)))
+    (when (and node (<= (treesit-node-end node) (line-end-position))
+               (string-empty-p (string-trim (buffer-substring-no-properties
+                                             (treesit-node-end node) (line-end-position)))))
+      node)))
+
+(defun djot-newline ()
+  "Continue lists or tables at point; otherwise insert an ordinary newline.
+An empty list item ends the list.  In a definition term, start its body."
+  (interactive)
+  (let ((item (djot--item-at-point))
+        (empty-marker (djot--empty-item-marker)))
+    (cond
+     (empty-marker
+      (delete-region (treesit-node-start empty-marker) (line-end-position)))
+     ((djot-node-at (point) "table") (djot-table-insert-row))
+     ((and item (djot--field item "term")
+           (<= (point) (treesit-node-end (djot--field item "term"))))
+      (let ((prefix (djot--item-prefix item)))
+        (end-of-line)
+        (insert "\n" prefix "\n" prefix "  ")))
+     ((and item (not (or (djot-node-at (point) "code_block")
+                         (djot-node-at (point) "raw_block"))))
+      (djot-insert-item))
+     (t (newline)))))
+
+(defun djot-toggle-checkbox (&optional remove)
+  "Toggle the current task checkbox, or add one to a bullet item.
+With prefix REMOVE, remove the checkbox while preserving the bullet."
+  (interactive "P")
+  (let* ((item (or (djot--item-at-point) (user-error "Not in a complete Djot list item")))
+         (marker (djot--field item "marker"))
+         (type (treesit-node-type marker))
+         (start (treesit-node-start marker))
+         (check (djot--field marker "checkmark")))
+    (unless (member type '("list_marker_task" "list_marker_dash" "list_marker_plus" "list_marker_star"))
+      (user-error "Djot checkboxes require a bullet list"))
+    (atomic-change-group
+      (save-excursion
+        (goto-char start)
+        (cond
+         ((and check remove) (delete-region (+ start 2) (treesit-node-end marker)))
+         (check
+          (search-forward "[" (treesit-node-end marker))
+          (delete-char 1)
+          (insert (if (equal (treesit-node-type check) "checked") " " "X")))
+         ((not remove) (forward-char 2) (insert "[ ] ")))))))
+
+(defun djot--shift-item (outward)
+  "Move the whole item one level OUTWARD, or under its previous sibling."
+  (let* ((item (or (djot--item-at-point) (user-error "Not in a complete Djot list item")))
+         (list-node (treesit-node-parent item))
+         (parent (treesit-node-parent list-node))
+         (previous (treesit-node-prev-sibling item t))
+         (start (save-excursion (goto-char (treesit-node-start (djot--field item "marker")))
+                                (line-beginning-position)))
+         (end (copy-marker (treesit-node-end item)))
+         (origin (point-marker))
+         (prefix (djot--item-prefix item))
+         (indent (length (if (string-match "[ \t]*\\'" prefix) (match-string 0 prefix) "")))
+         delta)
+    (if outward
+        (progn
+          (while (and parent (not (equal (treesit-node-type parent) "list_item")))
+            (setq parent (treesit-node-parent parent)))
+          (unless parent (user-error "Already a top-level item"))
+          (setq delta (- (length (djot--item-prefix parent)) (length prefix))))
+      (unless (and previous (equal (treesit-node-type previous) "list_item"))
+        (user-error "No preceding item to nest under"))
+      (setq delta 2))
+    (atomic-change-group
+      (save-excursion
+        (goto-char start)
+        ;; A blank line is required before a nested Djot block.
+        (when (and (not outward) (> start (point-min))
+                   (not (save-excursion (forward-line -1) (looking-at-p "[ \t>]*$"))))
+          (insert (replace-regexp-in-string "[ \t]+\\'" "" prefix) "\n"))
+        (while (< (point) end)
+          ;; Keep quote container prefixes unchanged.
+          (when (looking-at "\\(?:[ \t]*> ?\\)*") (goto-char (match-end 0)))
+          (if (> delta 0) (unless (looking-at-p "[ \t]*$") (insert (make-string delta ?\s)))
+            (let ((available (skip-chars-forward " \t" (line-end-position))))
+              (delete-region (- (point) available)
+                             (+ (- (point) available) (min available (- delta) indent)))))
+          (forward-line 1))))
+    (goto-char origin)
+    (set-marker origin nil)
+    (set-marker end nil)))
+
+(defun djot-indent-item ()
+  "Indent this item and its children beneath its previous sibling."
+  (interactive)
+  (djot--shift-item nil))
+
+(defun djot-outdent-item ()
+  "Outdent this item and its children one parsed list level."
+  (interactive)
+  (djot--shift-item t))
+
+(defun djot-indent-line ()
+  "Indent a continuation line relative to its containing Djot item.
+Leave non-list indentation alone.  Use M-<right> to nest an entire item."
+  (interactive)
+  (when-let* ((item (djot--item-at-point))
+              (marker (djot--field item "marker")))
+    (unless (= (line-beginning-position)
+               (save-excursion (goto-char (treesit-node-start marker)) (line-beginning-position)))
+      (unless (string-match-p ">" (djot--item-prefix item))
+        (indent-line-to (+ 2 (length (djot--item-prefix item))))))))
+
+(defun djot-cycle-list-marker ()
+  "Cycle the current list's bullets through -, +, *, 1., 1), and (1).
+Change siblings together, leaving nested lists and checkboxes intact."
+  (interactive)
+  (let* ((item (or (djot--item-at-point) (user-error "Not in a complete Djot list item")))
+         (items (djot-node-children (treesit-node-parent item)))
+         (text (string-trim (djot--text (djot--field item "marker"))))
+         (styles '("-" "+" "*" "1." "1)" "(1)"))
+         (style (or (cadr (member text styles)) "-")) (number 0) changes)
+    (when (djot--field item "term") (user-error "Definition lists use the : marker"))
+    (dolist (sibling items)
+      (when (equal (treesit-node-type sibling) "list_item")
+        (let* ((marker (djot--field sibling "marker"))
+               (task (djot--field marker "checkmark")))
+          (when task (user-error "Remove task checkboxes before cycling the list style"))
+          (push (list (treesit-node-start marker) (treesit-node-end marker)
+                      (concat (replace-regexp-in-string "1" (number-to-string (cl-incf number)) style) " ")) changes))))
+    (atomic-change-group
+      (save-excursion
+        (dolist (change changes)
+          (goto-char (car change))
+          (delete-region (car change) (cadr change))
+          (insert (nth 2 change)))))))
+
+(defun djot--table-rows ()
+  "Return editable rows of the parsed table at point.
+Each row is (START END PREFIX CELLS SEPARATOR BOUNDS).  Literal and escaped
+pipes are excluded using parsed inline ranges, not a regexp split."
+  (let ((table (djot-node-at (point) "table")) rows)
+    (unless (djot-node-valid-p table) (user-error "Not in a complete Djot table"))
+    (dolist (node (djot-node-children table))
+      (when (member (treesit-node-type node) '("table_header" "table_row" "table_separator"))
+        (let* ((start (treesit-node-start node))
+               (end (save-excursion (goto-char start) (line-end-position)))
+               (prefix (save-excursion (goto-char start)
+                                       (buffer-substring-no-properties (line-beginning-position) start)))
+               (protected (mapcar (lambda (capture)
+                                    (cons (treesit-node-start (cdr capture))
+                                          (treesit-node-end (cdr capture))))
+                                  (treesit-query-capture node
+                                                        '([(verbatim) (raw_inline) (math) (backslash_escape)] @literal))))
+               pipes cells bounds)
+          (save-excursion
+            (goto-char start)
+            (while (search-forward "|" end t)
+              (let ((pos (1- (point))))
+                (unless (cl-some (lambda (range) (and (>= pos (car range)) (< pos (cdr range)))) protected)
+                  (push pos pipes)))))
+          (setq pipes (nreverse pipes))
+          (unless (and (> (length pipes) 1) (= (car pipes) start)
+                       (string-empty-p (string-trim (buffer-substring-no-properties (1+ (car (last pipes))) end))))
+            (user-error "Incomplete Djot table row"))
+          (while (cdr pipes)
+            (push (cons (1+ (car pipes)) (cadr pipes)) bounds)
+            (push (string-trim (buffer-substring-no-properties (1+ (car pipes)) (cadr pipes))) cells)
+            (setq pipes (cdr pipes)))
+          (setq cells (nreverse cells))
+          (push (list start end prefix cells
+                      (cl-every (lambda (cell) (string-match-p "\\`:?-+:?\\'" cell)) cells)
+                      (nreverse bounds)) rows))))
+    (or (nreverse rows) (user-error "No table rows"))))
+
+(defun djot--table-location (rows)
+  "Return (ROW COLUMN OFFSET) for point in ROWS."
+  (let* ((row-index (or (cl-position-if (lambda (row) (and (<= (car row) (point))
+                                                          (<= (point) (cadr row)))) rows) 0))
+         (row (nth row-index rows))
+         (bounds (nth 5 row))
+         (column (or (cl-position-if (lambda (range) (<= (point) (cdr range))) bounds)
+                     (1- (length bounds))))
+         (range (nth column bounds)))
+    (list row-index column (- (point) (car range)))))
+
+(defun djot--table-goto (row column &optional offset)
+  "Go to COLUMN of table ROW, optionally OFFSET characters into the cell."
+  (let* ((rows (djot--table-rows))
+         (entry (nth (min row (1- (length rows))) rows))
+         (bounds (nth 5 entry))
+         (range (nth (min column (1- (length bounds))) bounds)))
+    (goto-char (min (cdr range) (+ (car range) (or offset 0))))
+    (unless offset (skip-chars-forward " \t" (cdr range)))))
+
+(defun djot--table-write (rows)
+  "Replace ROWS' source with aligned cells, preserving captions and prefixes."
+  (let* ((count (apply #'max (mapcar (lambda (row) (length (nth 3 row))) rows)))
+         (widths (make-vector count 3))
+         (alignments (make-vector count 'left)) changes)
+    (dolist (row rows)
+      (unless (nth 4 row)
+        (cl-loop for cell in (nth 3 row) for i from 0 do
+                 (aset widths i (max (aref widths i) (string-width cell))))))
+    (dolist (row rows)
+      (let (cells)
+        (dotimes (i count)
+          (let* ((cell (or (nth i (nth 3 row)) (if (nth 4 row) "---" "")))
+                 (width (aref widths i)))
+            (if (nth 4 row)
+                (let ((left (string-prefix-p ":" cell)) (right (string-suffix-p ":" cell)))
+                  (aset alignments i (cond ((and left right) 'center) (right 'right) (t 'left)))
+                  (push (concat (if left ":" "-") (make-string width ?-) (if right ":" "-")) cells))
+              (let* ((padding (- width (string-width cell)))
+                     (left (pcase (aref alignments i) ('right padding) ('center (/ padding 2)) (_ 0))))
+                (push (concat " " (make-string left ?\s) cell (make-string (- padding left) ?\s) " ") cells)))))
+        (push (list (car row) (cadr row) (concat "|" (mapconcat #'identity (nreverse cells) "|") "|")) changes)))
+    (dolist (change changes)
+      (goto-char (car change))
+      (unless (equal (buffer-substring-no-properties (car change) (cadr change)) (nth 2 change))
+        (delete-region (car change) (cadr change))
+        (insert (nth 2 change))))))
+
+(defun djot-table-align ()
+  "Align the parsed table, preserving escaped/verbatim pipes and alignment.
+Widths use source characters so source-display toggling remains usable."
+  (interactive)
+  (let* ((rows (djot--table-rows)) (location (djot--table-location rows))
+         (origin (copy-marker (caar rows))))
+    (atomic-change-group
+      (djot--table-write rows)
+      (goto-char origin)
+      (apply #'djot--table-goto location))
+    (set-marker origin nil)))
+
+(defun djot-table-next-cell (&optional backward)
+  "Align and move to the next table cell, or previous with BACKWARD.
+Skip separator rows.  Moving past the last data row appends an empty row."
+  (interactive)
+  (djot-table-align)
+  (let* ((rows (djot--table-rows))
+         (location (djot--table-location rows))
+         (row (car location)) (column (+ (cadr location) (if backward -1 1))))
+    (when (or (< column 0) (>= column (length (nth 3 (nth row rows)))))
+      (setq row (+ row (if backward -1 1)))
+      (while (and (>= row 0) (< row (length rows)) (nth 4 (nth row rows)))
+        (setq row (+ row (if backward -1 1))))
+      (setq column (if backward (1- (length (nth 3 (nth row rows)))) 0)))
+    (cond
+     ((< row 0) (user-error "First table cell"))
+     ((>= row (length rows))
+      (goto-char (cadr (car (last rows))))
+      (djot-table-insert-row)
+      (djot--table-goto row 0))
+     (t (djot--table-goto row column)))))
+
+(defun djot-table-previous-cell ()
+  "Align and move to the previous table cell, skipping separators."
+  (interactive)
+  (djot-table-next-cell t))
+
+(defun djot-table-insert-row (&optional above separator)
+  "Insert an empty row below point, or ABOVE with a prefix argument.
+If SEPARATOR is non-nil, insert a Djot header separator instead."
+  (interactive "P")
+  (let* ((rows (djot--table-rows))
+         (location (djot--table-location rows))
+         (row (nth (car location) rows))
+         (prefix (nth 2 row))
+         (cells (make-list (length (nth 3 row)) (if separator "---" " "))))
+    (atomic-change-group
+      (goto-char (if above (car row) (cadr row)))
+      (if above
+          (progn (insert "|" (mapconcat #'identity cells "|") "|\n" prefix)
+                 (goto-char (car row)))
+        (insert "\n" prefix "|" (mapconcat #'identity cells "|") "|")
+        (beginning-of-line) (forward-char (length prefix)))
+      (djot-table-align)
+      (djot--table-goto (+ (car location) (if above 0 1)) (cadr location)))))
+
+(defun djot-table-insert-separator ()
+  "Insert a header separator below the current table row."
+  (interactive)
+  (djot-table-insert-row nil t))
+
+(defun djot-table-delete-row ()
+  "Delete the current table row, including its container prefix."
+  (interactive)
+  (let* ((rows (djot--table-rows)) (location (djot--table-location rows))
+         (row (nth (car location) rows)))
+    (atomic-change-group
+      (goto-char (car row))
+      (delete-region (line-beginning-position) (min (point-max) (1+ (cadr row)))))))
+
+(defun djot--table-change-column (delete after)
+  "Insert a column, or DELETE it; insert AFTER point if requested."
+  (let* ((rows (djot--table-rows)) (location (djot--table-location rows))
+         (column (+ (cadr location) (if (and after (not delete)) 1 0)))
+         (count (apply #'max (mapcar (lambda (row) (length (nth 3 row))) rows)))
+         (origin (copy-marker (caar rows))))
+    (when (and delete (= count 1)) (user-error "Cannot delete the only table column"))
+    (dolist (row rows)
+      (let ((cells (append (nth 3 row) (make-list (- count (length (nth 3 row))) ""))))
+        (setf (nth 3 row) (append (cl-subseq cells 0 column)
+                                  (unless delete (list (if (nth 4 row) "---" "")))
+                                  (nthcdr (+ column (if delete 1 0)) cells)))))
+    (atomic-change-group
+      (djot--table-write rows)
+      (goto-char origin)
+      (djot--table-goto (car location) column))
+    (set-marker origin nil)))
+
+(defun djot-table-insert-column (&optional after)
+  "Insert an empty column before point, or AFTER with a prefix argument."
+  (interactive "P")
+  (djot--table-change-column nil after))
+
+(defun djot-table-delete-column ()
+  "Delete the current column from all rows of the parsed table."
+  (interactive)
+  (djot--table-change-column t nil))
+
+(defun djot-tab ()
+  "Align/advance in tables, cycle a heading, or indent the current line."
+  (interactive)
+  (cond
+   ((djot-node-at (point) "table") (djot-table-next-cell))
+   ((djot-node-at (point) "heading") (djot-cycle))
+   (t (indent-for-tab-command))))
+
+(defun djot-backtab ()
+  "Move backward in tables; elsewhere toggle the heading overview."
+  (interactive)
+  (if (djot-node-at (point) "table") (djot-table-previous-cell)
+    (djot-cycle-global)))
+
+(defun djot--escape-link-text (text)
+  "Escape delimiter characters in plain link description TEXT."
+  (replace-regexp-in-string "[][\\\\]" (lambda (char) (concat "\\" char)) text t t))
+
+(defun djot--encode-destination (destination)
+  "Encode whitespace and delimiters in a literal DESTINATION string."
+  (replace-regexp-in-string
+   "[ \t\r\n()\\\\]"
+   (lambda (char) (pcase char (" " "%20") ("\t" "%09") ("\n" "%0A")
+                         ("\r" "%0D") (_ (concat "\\" char)))) destination t t))
+
+(defun djot-insert-link (destination description)
+  "Insert or replace an inline link with DESTINATION and DESCRIPTION.
+Interactively use the active region as the default description.  Existing
+image links remain images.  This explicit edit reveals the resulting source."
+  (interactive
+   (let* ((node (djot--link-at-point))
+          (bounds (and node (djot--link-text-bounds node)))
+          (text (cond ((use-region-p) (buffer-substring-no-properties (region-beginning) (region-end)))
+                      (bounds (buffer-substring-no-properties (car bounds) (cdr bounds)))
+                      (t ""))))
+     (list (read-string "Destination: " (and node (djot-link-destination node)))
+           (read-string "Description: " text))))
+  (let* ((node (djot--link-at-point))
+         (image (and node (string-suffix-p "image" (treesit-node-type node))))
+         (beg (cond ((use-region-p) (region-beginning)) (node (treesit-node-start node)) (t (point))))
+         (end (cond ((use-region-p) (region-end)) (node (treesit-node-end node)) (t (point)))))
+    (atomic-change-group
+      (delete-region beg end)
+      (goto-char beg)
+      (insert (if image "![" "[") (djot--escape-link-text description)
+              "](" (djot--encode-destination destination) ")"))
+    (djot-show-source 1)))
+
+(defun djot--definition (label type)
+  "Return the last parsed definition of LABEL with node TYPE."
+  (let (result)
+    (djot-map-nodes
+     (lambda (node)
+       (when (and (djot-node-valid-p node)
+                  (equal label (djot--normalize-label (djot--text (djot--field node "label")))))
+         (setq result node))) nil nil (list type))
+    result))
+
+(defun djot--check-label (label)
+  "Reject LABEL if it cannot be a nonempty single-line reference label."
+  (when (or (string-empty-p (string-trim label)) (string-match-p "[][\n\r]" label))
+    (user-error "A label must be nonempty and contain no brackets or newlines")))
+
+(defun djot-insert-reference (label destination)
+  "Create or update reference LABEL with literal DESTINATION.
+Use the last matching definition, as does the renderer.  New definitions
+are appended as separate blocks; existing link descriptions stay unchanged."
+  (interactive (list (read-string "Reference label: ") (read-string "Destination: ")))
+  (djot--check-label label)
+  (let* ((node (djot--definition (djot--normalize-label label) "link_reference_definition"))
+         (beg (and node (treesit-node-start node)))
+         (end (and node (treesit-node-end node))))
+    (atomic-change-group
+      (save-excursion
+        (if node (progn (goto-char beg) (delete-region beg end))
+          (goto-char (point-max))
+          (unless (bolp) (insert "\n"))
+          (unless (or (= (point) (point-min))
+                      (save-excursion (forward-line -1) (looking-at-p "[ \t]*$")))
+            (insert "\n")))
+        (insert "[" label "]: " (djot--encode-destination destination) "\n")))))
+
+(defun djot-insert-reference-link (label description)
+  "Insert a reference link using LABEL and plain DESCRIPTION."
+  (interactive
+   (progn
+     (djot--ensure-index)
+     (list (completing-read "Reference: " (append djot--references (djot--heading-references)))
+           (read-string "Description: " (when (use-region-p)
+                                          (buffer-substring-no-properties (region-beginning) (region-end)))))))
+  (djot--check-label label)
+  (atomic-change-group
+    (when (use-region-p) (delete-region (region-beginning) (region-end)))
+    (insert "[" (djot--escape-link-text description) "][" label "]")))
+
+(defun djot-goto-reference ()
+  "Visit the definition of the reference link at point, without opening it."
+  (interactive)
+  (let* ((node (or (djot--link-at-point) (user-error "No link here")))
+         (label-node (djot--field node "label"))
+         (bounds (djot--link-text-bounds node))
+         (label (djot--normalize-label (if label-node (djot--text label-node)
+                                        (buffer-substring-no-properties (car bounds) (cdr bounds)))))
+         (definition (djot--definition label "link_reference_definition")))
+    (unless definition (user-error "No explicit reference definition for %s" label))
+    (push-mark)
+    (goto-char (treesit-node-start definition))
+    (djot--reveal-position)
+    (djot-show-source 1)))
+
+(defun djot-insert-footnote (&optional label)
+  "Insert a footnote reference and visit its definition.
+Reuse LABEL when supplied; otherwise allocate an unused numeric label.
+On an existing reference, visit it instead.
+Use `djot-footnote-return' to return to the source."
+  (interactive (list (when current-prefix-arg (read-string "Footnote label: "))))
+  (let ((node (djot--link-at-point)))
+    (if (and node (equal (treesit-node-type node) "footnote_reference"))
+        (djot-open-at-point)
+      (unless label
+        (let ((number 1) labels)
+          (djot-map-nodes (lambda (n) (push (djot--text n) labels)) nil nil '("reference_label"))
+          (while (member (number-to-string number) labels) (cl-incf number))
+          (setq label (number-to-string number))))
+      (djot--check-label label)
+      (let* ((definition (djot--definition label "footnote"))
+             (target (and definition (copy-marker (treesit-node-start definition) t)))
+             (origin (point-marker)))
+        (atomic-change-group
+          (insert "[^" label "]")
+          (if target (goto-char target)
+            (goto-char (point-max))
+            (unless (bolp) (insert "\n"))
+            (insert "\n[^" label "]: ")))
+        (setq djot--footnote-return origin)
+        (djot--reveal-position)
+        (when target (set-marker target nil))))))
+
 (defun djot--outline-level ()
   "Return the current heading's outline level."
   (save-excursion
@@ -613,9 +1317,11 @@ Unsafe executable URL schemes are rejected, never evaluated."
   "Remove only this mode's overlays and parser."
   (save-restriction
     (widen)
-    (djot--clear-overlays (point-min) (point-max)))
+    (djot--clear-overlays (point-min) (point-max))
+    (djot-show-all))
   (when djot-parser (treesit-parser-delete djot-parser) (setq djot-parser nil))
-  (remove-from-invisibility-spec 'djot-markup))
+  (remove-from-invisibility-spec 'djot-markup)
+  (remove-from-invisibility-spec '(djot-fold . t)))
 
 (defvar djot-mode-map
   (let ((map (make-sparse-keymap)))
@@ -624,6 +1330,31 @@ Unsafe executable URL schemes are rejected, never evaluated."
     (define-key map (kbd "C-c C-m") #'djot-toggle-markup)
     (define-key map (kbd "C-c '") #'djot-edit-at-point)
     (define-key map (kbd "C-c C-b") #'djot-footnote-return)
+    (define-key map (kbd "TAB") #'djot-tab)
+    (define-key map (kbd "<backtab>") #'djot-backtab)
+    (define-key map (kbd "RET") #'djot-newline)
+    (define-key map (kbd "M-RET") #'djot-insert-item)
+    (define-key map (kbd "M-<right>") #'djot-indent-item)
+    (define-key map (kbd "M-<left>") #'djot-outdent-item)
+    (define-key map (kbd "C-c C-c") #'djot-toggle-checkbox)
+    (define-key map (kbd "C-c -") #'djot-cycle-list-marker)
+    (define-key map (kbd "C-c C-n") #'djot-next-heading)
+    (define-key map (kbd "C-c C-p") #'djot-previous-heading)
+    (define-key map (kbd "C-c C-u") #'djot-up-heading)
+    (define-key map (kbd "C-c C-a") #'djot-show-all)
+    (define-key map (kbd "C-c <left>") #'djot-promote-heading)
+    (define-key map (kbd "C-c <right>") #'djot-demote-heading)
+    (define-key map (kbd "C-c C-l") #'djot-insert-link)
+    (define-key map (kbd "C-c C-x r") #'djot-goto-reference)
+    (define-key map (kbd "C-c C-x l") #'djot-insert-reference-link)
+    (define-key map (kbd "C-c C-x d") #'djot-insert-reference)
+    (define-key map (kbd "C-c C-f") #'djot-insert-footnote)
+    (define-key map (kbd "C-c |") #'djot-table-align)
+    (define-key map (kbd "C-c C-t i") #'djot-table-insert-row)
+    (define-key map (kbd "C-c C-t d") #'djot-table-delete-row)
+    (define-key map (kbd "C-c C-t c") #'djot-table-insert-column)
+    (define-key map (kbd "C-c C-t k") #'djot-table-delete-column)
+    (define-key map (kbd "C-c C-t -") #'djot-table-insert-separator)
     map)
   "Keymap for `djot-mode'.")
 
@@ -655,6 +1386,9 @@ Install the pinned grammar specified in README.org with
   (setq-local comment-start "{% ")
   (setq-local comment-end " %}")
   (add-to-invisibility-spec 'djot-markup)
+  (add-to-invisibility-spec '(djot-fold . t))
+  (setq-local indent-line-function #'djot-indent-line)
+  (add-hook 'before-change-functions #'djot--guard-folded-edit nil t)
   (add-hook 'after-change-functions #'djot--after-change nil t)
   (add-hook 'change-major-mode-hook #'djot--teardown nil t)
   (add-hook 'kill-buffer-hook #'djot--teardown nil t))
