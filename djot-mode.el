@@ -1383,6 +1383,15 @@ Use `djot-footnote-return' to return to the source."
   (remove-from-invisibility-spec 'djot-markup)
   (remove-from-invisibility-spec '(djot-fold . t)))
 
+;; Optional tools are loaded only when an explicit command is invoked.
+(autoload 'djot-display-inline-images "djot-preview" nil t)
+(autoload 'djot-remove-inline-images "djot-preview" nil t)
+(autoload 'djot-preview-math "djot-preview" nil t)
+(autoload 'djot-clear-math-preview "djot-preview" nil t)
+(autoload 'djot-clear-math-cache "djot-preview" nil t)
+(autoload 'djot-export-to-html "djot-preview" nil t)
+(autoload 'djot-preview-html "djot-preview" nil t)
+
 (defvar djot-mode-map
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "C-c C-o") #'djot-open-at-point)
@@ -1415,6 +1424,10 @@ Use `djot-footnote-return' to return to the source."
     (define-key map (kbd "C-c C-t c") #'djot-table-insert-column)
     (define-key map (kbd "C-c C-t k") #'djot-table-delete-column)
     (define-key map (kbd "C-c C-t -") #'djot-table-insert-separator)
+    (define-key map (kbd "C-c C-x i") #'djot-display-inline-images)
+    (define-key map (kbd "C-c C-x m") #'djot-preview-math)
+    (define-key map (kbd "C-c C-x e") #'djot-export-to-html)
+    (define-key map (kbd "C-c C-x p") #'djot-preview-html)
     map)
   "Keymap for `djot-mode'.")
 

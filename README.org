@@ -1,6 +1,6 @@
 #+title: djot-mode
 
-A Tree-sitter major mode for [[https://djot.net][Djot]], independent of the optional =djot-modern= presentation package.  Requires Emacs 30.1+ with Tree-sitter. The major mode provides semantic highlighting, descriptive clickable links, native language highlighting, explicit source display, and structured heading/list/table/reference editing. Explicit image/math/official-renderer previews are the next implementation stage, not responsibilities delegated to the visual mode.
+A Tree-sitter major mode for [[https://djot.net][Djot]], independent of the optional =djot-modern= presentation package.  Requires Emacs 30.1+ with Tree-sitter. The major mode provides semantic highlighting, descriptive clickable links, native language highlighting, explicit source display, and structured heading/list/table/reference editing. Explicit local-image/math previews and official-renderer HTML export live in the optional, command-loaded =djot-preview.el= companion, not in the visual mode.
 
 * Install
 
@@ -79,6 +79,30 @@ Heading TAB cycles folded / children / open; S-TAB toggles the overview. Movemen
 
 Table cells come from the pinned grammar, including zero-width empty cells and escaped/verbatim pipes. Alignment preserves captions, column alignment markers, quote/list prefixes and the final-newline state. Widths follow currently visible base text, like Org, and ignore modern/foreign padding. After changing explicit source display, realign if desired; toggling display itself never changes text or undo. TAB skips separator rows and adds a data row after the last cell. Commands reject malformed structures rather than guessing at syntax.
 
+* Explicit previews and HTML export
+
+Nothing is fetched, rendered externally or executed by fontification, redisplay or modern activation. These commands load =djot-preview.el= on demand; missing optional tools affect only the requested command, never ordinary editing.
+
+| Key | Command / result |
+|-----+------------------|
+| C-c C-x i | =djot-display-inline-images=: display accessible local images |
+| M-x djot-remove-inline-images | Remove local-image previews |
+| C-c C-x m | =djot-preview-math=: math at point or in active region; prefix previews accessible buffer |
+| M-x djot-clear-math-preview | Remove math previews, retaining cached SVGs |
+| M-x djot-clear-math-cache | Remove previews and this buffer's private math cache |
+| C-c C-x e | =djot-export-to-html=: official HTML beside the visited source |
+| C-c C-x p | =djot-preview-html=: confirm trust, then open a temporary browser preview |
+
+Local images require graphical Emacs image support. Relative paths, percent-encoded filenames and reference images resolve against the visited source directory (or =default-directory= for an unvisited buffer); remote files, URL authorities and non-file schemes are skipped without fetching. The explicit image command refreshes the image cache. Customize =djot-image-max-width= and =djot-image-max-height= for pixel limits. Normal link activation remains available on previewed images.
+
+Math needs SVG support and real =latex= plus =dvisvgm= executables; customize =djot-latex-command=, =djot-dvisvgm-command= and =djot-math-scale= if needed. Only parser-confirmed, explicitly matched =$= / =$$= backtick fragments are previewed. The fixed preamble includes =amsmath=, =amssymb= and =xcolor=. LaTeX runs with =-no-shell-escape= in private temporary directories, with no document code blocks or document-supplied preambles executed. This is *not a sandbox*: untrusted TeX can read TeX-accessible local files and consume CPU, memory or disk. Preview only trusted math; =C-g= cancels synchronous rendering. Failures report =*Djot diagnostics*= and never replace source or successful exports.
+
+Preview overlays preserve text, point, undo, search/copy and foreign overlays. Any source edit clears them conservatively, including edits to distant image references; explicitly rerun the command afterward. =djot-show-source= suspends/restores previews without rerendering or editing source. Font/theme/scale changes invalidate math previews rather than launching background LaTeX; explicitly preview again to use the new colors and scale. Successful SVGs are cached by exact TeX, display metrics and executable identity in a private per-buffer temporary directory, reused until cache clearing or buffer/mode teardown. Transient render files are removed on success, failure and cancellation. Modern-off retains previews; modern table layout measures their actual displays, while source alignment continues to ignore display padding/images and edits only text.
+
+HTML export requires the official =@djot/djot= CLI (validated with version 0.3.2); set =djot-command= to its executable if not on =PATH=. The mode passes source through stdin with =--to html= and no filters or shell. The output is the official HTML fragment, unchanged and *not sanitized*, with no CSP inserted into ordinary exports. The default output is beside the source so relative resources work; when calling =djot-export-to-html= with a different directory, arrange relative resources there yourself. Unvisited buffers prompt for an output path; noninteractive calls must supply one. Existing output is replaced only after rendering and writing succeed, and export refuses to overwrite the source itself.
+
+Browser preview is a separate trusted-document action with an explicit confirmation *each time*, before rendering or launching anything. It fails closed noninteractively and does not launch on refusal, export alone, or background actions. The temporary wrapper lives beside the source (or in =default-directory=) so relative resources resolve correctly; mode/buffer teardown deletes it. It contains a restrictive CSP denying scripts, objects, connections and form submissions while allowing local images and inline styles. CSP is only defense-in-depth, *not sanitization*: raw HTML, attributes and URLs remain official output, browsers differ, and meta-refresh or other navigation can still leave the document or cause network access. Trust the document before confirming; never assume that a local file or this CSP makes hostile HTML safe.
+
 * Extension interface
 
 =djot-mode= owns exactly one buffer-local =djot-parser=.  Extensions must reuse it.  The following interfaces are stable for the editing/presentation stages:
@@ -91,7 +115,7 @@ Table cells come from the pinned grammar, including zero-width empty cells and e
 - =djot-refresh (&optional beg end)=: flush/ensure base fontification, preserving source, point, undo and modified status.
 - =djot-after-fontify-hook=: functions receive BEG END after base faces, native tokens, and base overlays are installed.  Ranges may overlap/repeat.  They are fontification ranges, not necessarily complete syntax nodes.  Rebuild only your own decorations within them; never retain nodes across edits.
 
-Base overlays have =djot-mode= property t and own the =djot-markup= invisibility category.  Extensions must not remove them.  Use separately tagged overlays or face remapping for visual effects, preserving native token foregrounds, links and concealment.  Do not replace the base font-lock rules or create a second parser.  Folding uses separately tagged =djot-fold= overlays and invisibility category; it never removes presentation overlays. Teardown removes only base overlays, folds and the base parser. Semantic faces are =djot-heading-1= through =djot-heading-6=, =djot-code=, =djot-verbatim=, =djot-quote=, =djot-attribute=, =djot-marker=, =djot-language=, =djot-table=, =djot-list-marker=, =djot-link=, =djot-destination=, =djot-footnote=, =djot-emphasis=, =djot-strong=, =djot-highlight=, =djot-insert=, =djot-delete=, and =djot-math=.
+Base overlays have =djot-mode= property t and own the =djot-markup= invisibility category.  Extensions must not remove them.  Use separately tagged overlays or face remapping for visual effects, preserving native token foregrounds, links and concealment.  Do not replace the base font-lock rules or create a second parser.  Folding uses separately tagged =djot-fold= overlays and invisibility category; it never removes presentation overlays. Teardown removes only base overlays, folds and the base parser; the command-loaded preview companion separately owns =djot-preview= overlays and private temporary files. Extensions changing replacement displays without editing text must request =djot-refresh= for dependent layout. Semantic faces are =djot-heading-1= through =djot-heading-6=, =djot-code=, =djot-verbatim=, =djot-quote=, =djot-attribute=, =djot-marker=, =djot-language=, =djot-table=, =djot-list-marker=, =djot-link=, =djot-destination=, =djot-footnote=, =djot-emphasis=, =djot-strong=, =djot-highlight=, =djot-insert=, =djot-delete=, and =djot-math=.
 
 * Development and provenance
 
@@ -101,6 +125,9 @@ make oracle GRAMMAR_DIR=/path/to/tree-sitter \
   DJOT_ORACLE_MODULE=/path/to/node_modules/@djot/djot
 make edit-oracle GRAMMAR_DIR=/path/to/tree-sitter \
   DJOT_ORACLE_MODULE=/path/to/node_modules/@djot/djot
+make preview-oracle GRAMMAR_DIR=/path/to/tree-sitter \
+  DJOT_ORACLE_MODULE=/path/to/node_modules/@djot/djot
+DJOT_COMMAND=/path/to/djot make check GRAMMAR_DIR=/path/to/tree-sitter
 make benchmark GRAMMAR_DIR=/path/to/tree-sitter
 #+end_src
 

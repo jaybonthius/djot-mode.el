@@ -10,7 +10,8 @@
               (lambda (_position message)
                 (setq failures (1+ failures))
                 (princ (concat message "\n"))))
-  (find-file "djot-mode.el")
-  (checkdoc-current-buffer t)
+  (dolist (file '("djot-mode.el" "djot-preview.el"))
+    (find-file file)
+    (checkdoc-current-buffer t))
   (when (> failures 0) (kill-emacs 1)))
 ;;; checkdoc.el ends here
