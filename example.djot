@@ -1,0 +1,59 @@
+# Djot: a readable document
+
+Prose with _emphasis_, *strong text*, {=highlighting=},
+{+an insertion+}, {-a deletion-}, H~2~O and x^2^.
+A [descriptive link](https://djot.net), [reference][guide],
+<https://djot.net>, and a note[^reading] stay interactive.
+
+## Structure and references
+
+Jump to [Native code][] or [this heading](#Structure-and-references).
+Escaped \_characters\_ and `literal *code*` remain source.
+
+### Third level
+
+#### Fourth level
+
+##### Fifth level
+
+###### Sixth level
+
+## Native code
+
+```elisp
+(defun greet (name)
+  "Return a friendly greeting."
+  (format "Hello, %s!" name))
+```
+
+```python
+def greet(name):
+    # Native language tokens, not a single code color.
+    return f"Hello, {name}!"
+```
+
+> Quoted prose follows the body font.
+>
+> Another paragraph in the quote.
+
+## Lists, tables and attributes
+
+- [ ] Read the specification
+- [X] Inspect the source
+- Keep the original text
+
+| Feature | Ownership |
+|:--------|----------:|
+| Links | Major mode |
+| Typography | Modern |
+
+{#details .note}
+::: note
+A [styled span]{.highlight role="example"} inside a div.
+:::
+
+Inline math $`e=mc^2` and a local image ![sample](sample.svg).
+
+[guide]: https://djot.net
+
+[^reading]: Read Djot's syntax guide for normative behavior.

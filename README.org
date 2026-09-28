@@ -1,0 +1,116 @@
+#+title: djot-mode
+
+A Tree-sitter major mode for [[https://djot.net][Djot]], independent of the optional
+=djot-modern= presentation package.  Requires Emacs 30.1+ with Tree-sitter.
+This foundation provides semantic highlighting, descriptive clickable links,
+explicit source display, and native language highlighting.  Structured editing
+and explicit image/math/official-renderer previews are the next implementation
+stages of this package, not responsibilities delegated to the visual mode.
+
+* Install
+
+Put this directory on =load-path=, then configure the real Djot grammar:
+
+#+begin_src emacs-lisp
+(add-to-list 'load-path "/path/to/emacs-djot-mode")
+(require 'djot-mode)
+(add-to-list 'treesit-language-source-alist
+             '(djot "https://github.com/treeman/tree-sitter-djot"))
+;; Once: M-x treesit-install-language-grammar RET djot RET
+#+end_src
+
+Grammar installation needs Git and a C/C++ compiler.  Emacs loads the installed
+shared library from its =tree-sitter= directory; use =treesit-extra-load-path=
+for another location.  =.djot= and =.dj= files select =djot-mode=.  Loading the
+package needs no renderer, browser, LaTeX installation, or modern package.
+Activation reports a useful error if the grammar is missing; it does not use
+a second, approximate parser.
+
+* Document display
+
+As in Org, links are descriptive by default, while emphasis markers remain
+visible.  A readable-document configuration is explicit and buffer-local:
+
+#+begin_src emacs-lisp
+(add-hook 'djot-mode-hook
+          (lambda ()
+            (setq-local djot-hide-markup t)
+            (setq-local djot-descriptive-links t)
+            (visual-line-mode 1)))
+;; Optional presentation layer, installed separately:
+;; (require 'djot-modern)
+;; (add-hook 'djot-mode-hook #'djot-modern-mode)
+#+end_src
+
+The base mode inherits theme =outline-1= through =outline-6= colors.  Code is
+fixed-pitch and fontified by its real Emacs language mode; =elisp= aliases
+=emacs-lisp-mode=.  Customize =djot-language-modes= for more aliases.  Raw blocks
+are literal, never language-fontified.  Unknown languages remain readable
+fixed-pitch source.  No document code, file-local variables, or source mode
+hooks are run while highlighting.
+
+| Key       | Command / result                                      |
+|-----------+-------------------------------------------------------|
+| C-c C-o   | Open link, local file, heading anchor, or footnote      |
+| RET       | Open when on link description                         |
+| mouse-2   | Open the clicked link                                 |
+| C-c C-b   | Return from a footnote to its reference                |
+| C-c C-s   | Toggle explicit source display (all link/emphasis syntax) |
+| C-c C-m   | Toggle matched emphasis-marker concealment             |
+| C-c '     | Reveal source and move to the link destination         |
+
+Movement never reveals concealed source.  Copy, search, undo and saving still
+operate on original Djot text.  Unmatched syntax, escapes, raw content and code
+remain visible.  Set =djot-descriptive-links= nil for visible link source.
+After changing a display option in an existing buffer, call =djot-refresh=.
+Built-in =outline-minor-mode= and Imenu are available for heading navigation.
+
+Opening links is explicit.  HTTP(S), mail and FTP links use =browse-url=;
+relative/local files use =find-file=.  Executable schemes such as =javascript:=
+and remote file URLs are rejected.  Reference labels are case-sensitive.
+No resource is fetched by fontification.
+
+* Extension interface
+
+=djot-mode= owns exactly one buffer-local =djot-parser=.  Extensions must reuse
+it.  The following interfaces are stable for the editing/presentation stages:
+
+- =djot-node-at (&optional position type)=: smallest node or requested ancestor.
+- =djot-node-children (node)=: named children in source order.
+- =djot-node-valid-p (node)=: reject missing/error-containing/error-nested nodes.
+- =djot-map-nodes (function &optional beg end types)=: visit intersecting named
+  nodes, including ancestors; clip effects to the requested accessible range.
+- =djot-link-destination (node)=: resolve link/image without resource access.
+- =djot-refresh (&optional beg end)=: flush/ensure base fontification, preserving
+  source, point, undo and modified status.
+- =djot-after-fontify-hook=: functions receive BEG END after base faces, native
+  tokens, and base overlays are installed.  Ranges may overlap/repeat.  They are
+  fontification ranges, not necessarily complete syntax nodes.  Rebuild only
+  your own decorations within them; never retain nodes across edits.
+
+Base overlays have =djot-mode= property t and own the =djot-markup= invisibility
+category.  Extensions must not remove them.  Use separately tagged overlays
+or face remapping for visual effects, preserving native token foregrounds,
+links and concealment.  Do not replace the base font-lock rules or create a
+second parser.  Teardown removes only base overlays and the base parser.
+Semantic faces are =djot-heading-1= through =djot-heading-6=, =djot-code=,
+=djot-verbatim=, =djot-quote=, =djot-attribute=, =djot-marker=, =djot-language=,
+=djot-table=, =djot-list-marker=, =djot-link=, =djot-destination=, =djot-footnote=,
+=djot-emphasis=, =djot-strong=, =djot-highlight=, =djot-insert=, =djot-delete=,
+and =djot-math=.
+
+* Development and provenance
+
+#+begin_src sh
+make check GRAMMAR_DIR=/path/to/tree-sitter
+#+end_src
+
+The gate runs warning-as-error byte compilation, strict Checkdoc and ERT using
+the real grammar.  Tests exercise public links, actual file visits, native
+code token faces, concealment, edits/undo, parser ownership and teardown.
+
+GPL-3.0-or-later; see =COPYING=.  Design references: John MacFarlane's upstream
+=djot-ts-mode= and Djot specification; Org's descriptive links and
+=org-src-font-lock-fontify-block=; org-modern's independently removable visual
+layer.  This is an independent implementation, not a fork of the incomplete
+Codeberg mode.  The external Tree-sitter grammar is maintained by treeman.
