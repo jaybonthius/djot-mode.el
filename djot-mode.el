@@ -98,7 +98,7 @@ Extensions must reuse this parser, never delete it or create another.")
 (defvar djot-after-fontify-hook nil
   "Functions called with BEG END after base fontification of that range.
 May run repeatedly on overlapping ranges.  Extensions must replace only
- their own decorations in that range, and must not change buffer text.
+their own decorations in that range, and must not change buffer text.
 Neither native token faces nor base overlays belong to extensions.")
 (defvar-local djot--footnote-return nil)
 (defvar-local djot--index-tick nil)
@@ -630,8 +630,8 @@ Unsafe executable URL schemes are rejected, never evaluated."
 ;;;###autoload
 (define-derived-mode djot-mode text-mode "Djot"
   "Major mode for Djot using one Tree-sitter parser.
-Install the grammar from https://codeberg.org/treeman/tree-sitter-djot
-with `treesit-install-language-grammar' before activating this mode."
+Install the pinned grammar specified in README.org with
+`treesit-install-language-grammar' before activating this mode."
   (unless (treesit-ready-p 'djot t)
     (user-error "Install the Djot grammar: see djot-mode README, then M-x treesit-install-language-grammar RET djot"))
   (setq djot-parser (treesit-parser-create 'djot))
