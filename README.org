@@ -11,11 +11,11 @@ Put this directory on =load-path=, then configure the real Djot grammar:
 (require 'djot-mode)
 (add-to-list 'treesit-language-source-alist
              '(djot "https://github.com/jaybonthius/tree-sitter-djot"
-                     "15b9d44f4f2030ba0911d1507514350e376a9136"))
+                     "0f5b121d78de97c4208ef725f02ebfc9ebe80799"))
 ;; Once: M-x treesit-install-language-grammar RET djot RET
 #+end_src
 
-Grammar installation needs Git and a C/C++ compiler.  Emacs loads the installed shared library from its =tree-sitter= directory; use =treesit-extra-load-path= for another location.  =.djot= and =.dj= files select =djot-mode=.  Loading the package needs no renderer, browser, LaTeX installation, or modern package. Activation reports a useful error if the grammar is missing; it does not use a second, approximate parser.  The pinned fork is based on maintained upstream =https://codeberg.org/treeman/tree-sitter-djot= at =ed551f3= and corrects multiline reference destinations, inline URL continuation lookahead, empty table cells, EOF and indented table rows, nested/multiline quoted captions, quoted heading boundaries, and falsely recognized ordered-list markers. Existing older grammars remain usable for their supported syntax, but the mode detects missing destination-chunk support and refuses potentially truncated reference targets.  Reinstall the pinned grammar and restart Emacs to load the new library; loading another revision in the same Emacs process is not reliable.
+Grammar installation needs Git and a C/C++ compiler.  Emacs loads the installed shared library from its =tree-sitter= directory; use =treesit-extra-load-path= for another location.  =.djot= and =.dj= files select =djot-mode=.  Loading the package needs no renderer, browser, LaTeX installation, or modern package. Activation reports a useful error if the grammar is missing; it does not use a second, approximate parser.  The pinned fork is based on maintained upstream =https://codeberg.org/treeman/tree-sitter-djot= at =ed551f3= and corrects multiline reference destinations, inline URL continuation lookahead, empty table cells, EOF and indented table rows, nested/multiline quoted captions, quoted heading boundaries, falsely recognized ordered-list markers, and display math in inline/EOF positions. Existing older grammars remain usable for their supported syntax, but the mode detects missing destination-chunk support and refuses potentially truncated reference targets.  Reinstall the pinned grammar and restart Emacs to load the new library; loading another revision in the same Emacs process is not reliable.
 
 * Document display
 
@@ -44,7 +44,7 @@ The base mode inherits theme =outline-1= through =outline-6= colors.  Code is fi
 | C-c C-m   | Toggle matched emphasis-marker concealment             |
 | C-c '     | Reveal source and move to the link destination         |
 
-Movement never reveals concealed source.  Copy, search, undo and saving still operate on original Djot text.  Unmatched syntax, escapes, raw content and code remain visible.  Set =djot-descriptive-links= nil for visible link source. After changing a display option in an existing buffer, call =djot-refresh=. Imenu and the parser-backed heading commands below ignore heading-like text in code and treat multiline headings as one heading.
+Movement never reveals concealed source.  Copy, search, undo and saving still operate on original Djot text.  Unmatched syntax, escapes, raw content and code contents remain visible; matched outer inline-code backticks follow =djot-hide-markup=.  Set =djot-descriptive-links= nil for visible link source. After changing a display option in an existing buffer, call =djot-refresh=. Imenu and the parser-backed heading commands below ignore heading-like text in code and treat multiline headings as one heading.
 
 Opening links is explicit.  HTTP(S), mail and FTP links use =browse-url=; relative/local files use =find-file=.  Executable schemes such as =javascript:= and remote file URLs are rejected.  Reference labels are case-sensitive. No resource is fetched by fontification.
 

@@ -44,8 +44,8 @@
 (defgroup djot nil "Edit Djot documents." :group 'text)
 
 (defcustom djot-hide-markup nil
-  "Hide matched emphasis and span delimiters.
-Literal, escaped, malformed and code syntax always remains visible."
+  "Hide matched emphasis, span and inline-code delimiters.
+Literal contents, escapes, malformed syntax and fenced/raw code stay visible."
   :type 'boolean :group 'djot :safe #'booleanp)
 
 (defcustom djot-descriptive-links t
@@ -205,6 +205,15 @@ With PRESERVE-OUTSIDE, retain the portions outside that range."
     ("subscript" . djot-emphasis))
   "Faces for paired inline constructs.")
 
+(defun djot--matched-verbatim-p (node)
+  "Return non-nil if NODE has equal, nonempty backtick delimiters.
+The grammar also accepts implicit paragraph-end closers; keep those visible."
+  (let ((begin (djot--text (djot--field node "begin_marker")))
+        (end (djot--text (djot--field node "end_marker"))))
+    (and (djot-node-valid-p node)
+         (string-match-p "\\``+\\'" begin)
+         (equal begin end))))
+
 (defun djot--fontify-node (node _override start end)
   "Fontify a captured NODE in START END, ignoring _OVERRIDE."
   (when (djot-node-valid-p node)
@@ -223,7 +232,13 @@ With PRESERVE-OUTSIDE, retain the portions outside that range."
         (let ((level (length (string-trim (djot--text (djot--field node "marker"))))))
           (djot--face content (intern (format "djot-heading-%d" (min 6 (max 1 level)))) start end)))
        ((equal type "block_quote") (djot--face content 'djot-quote start end t))
-       ((member type '("verbatim" "raw_inline")) (djot--face node 'djot-verbatim start end))
+       ((equal type "verbatim")
+        (djot--face node 'djot-verbatim start end)
+        (when (and djot-hide-markup (djot--matched-verbatim-p node))
+          (dolist (field '("begin_marker" "end_marker"))
+            (let ((marker (djot--field node field)))
+              (djot--hide (treesit-node-start marker) (treesit-node-end marker) start end)))))
+       ((equal type "raw_inline") (djot--face node 'djot-verbatim start end))
        ((equal type "raw_block") (djot--face node 'djot-code start end))
        ((equal type "code_block") (djot--fontify-code node start end))
        ((equal type "math") (djot--face node 'djot-math start end))
